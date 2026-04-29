@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
+from typing import Any, AsyncIterator
 
 import pytest
 from fastapi.testclient import TestClient
 
-pytestmark = pytest.mark.live
-
 from fanout_openrouter.app import create_app
 from fanout_openrouter.settings import Settings
+
+pytestmark = pytest.mark.live
 
 
 def _settings_without_embedded_key() -> tuple[Settings, str]:

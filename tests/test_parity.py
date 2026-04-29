@@ -25,16 +25,7 @@ The goal isn't "same bytes". It's "same wire contract".
 from __future__ import annotations
 
 import json
-import socket
-import subprocess
-import sys
-import threading
-import time
-
-import pytest
-
-pytestmark = pytest.mark.live
-
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -45,6 +36,8 @@ from fastapi.testclient import TestClient
 
 from fanout_openrouter.app import create_app
 from fanout_openrouter.settings import Settings
+
+pytestmark = pytest.mark.live
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 ORACLE_MODEL = "anthropic/claude-haiku-4.5"
