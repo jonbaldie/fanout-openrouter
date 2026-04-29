@@ -92,9 +92,11 @@ When a request includes `tools`, the fan-out and synthesis process still applies
 
 ## Opencode Integration
 
-To point your local installation of `opencode` at the running `fan-out-openrouter` facade, you need to define a custom provider in your `opencode.json` configuration file (typically located at `~/.config/opencode.json`).
+To point your local installation of `opencode` at the running `fan-out-openrouter` facade, you need to define a custom provider in your `opencode.json` configuration file. The location of this file depends on your platform (e.g., `~/.config/opencode/opencode.json` on macOS/Linux).
 
-Here is the exact structure you need to add. It uses the `@ai-sdk/openai-compatible` provider adapter which speaks the standard OpenAI wire format (which OpenRouter and our facade also speak).
+Here is the structure you need to add. It uses the `@ai-sdk/openai-compatible` provider adapter which speaks the standard OpenAI wire format (which OpenRouter and our facade also speak). 
+
+**Note:** If you already have an `opencode.json` file with existing providers, do not overwrite it. Instead, carefully add the `"fanoutlocal"` key into your existing `"provider"` object.
 
 ```json
 {
@@ -123,7 +125,7 @@ Here is the exact structure you need to add. It uses the `@ai-sdk/openai-compati
 4. **`models`** explicitly lists the virtual models that the facade exposes so that they show up in `opencode models` and can be routed to.
 
 #### How to use it:
-Once this is in your config and your facade is running locally (`uv run uvicorn fanout_openrouter.app:app`), you can invoke opencode to use this new provider and model like so:
+Once this is in your config and your facade is running locally in another terminal (`just dev`), you can invoke opencode to use this new provider and model like so:
 
 ```bash
 OPENROUTER_API_KEY="sk-or-..." opencode run --model fanoutlocal/fanout/minimal "Read my README.md file and summarize it."
