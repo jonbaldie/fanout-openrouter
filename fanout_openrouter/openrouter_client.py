@@ -44,6 +44,7 @@ class OpenRouterClient:
         *,
         api_key: str,
         base_url: str,
+        app_name: str,
         timeout: float,
         transport: httpx.AsyncBaseTransport | httpx.BaseTransport | None = None,
     ) -> None:
@@ -54,6 +55,7 @@ class OpenRouterClient:
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
+                "X-Title": app_name,
             },
         )
 

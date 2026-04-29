@@ -151,6 +151,7 @@ def create_app(
         client = OpenRouterClient(
             api_key=api_key,
             base_url=settings.openrouter_base_url,
+            app_name=settings.openrouter_app_name,
             timeout=settings.request_timeout_seconds,
             transport=app.state.transport,
         )

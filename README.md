@@ -48,6 +48,7 @@ The server automatically loads environment variables from a `.env` file in the r
 | `OPENROUTER_API_KEY` | *(None)* | Your OpenRouter API key. If not set, clients must pass it in the `Authorization: Bearer` header. |
 | `FANOUT_POLICY_FILE` | `fanout_policies.json` | Path to the JSON configuration file defining the virtual models. |
 | `OPENROUTER_BASE_URL` | `https://openrouter.ai/api/v1` | The base URL for upstream OpenRouter calls. |
+| `OPENROUTER_APP_NAME` | `fan-out-openrouter` | App name sent to OpenRouter as `X-Title` so usage logs can attribute requests to this facade. |
 | `OPENROUTER_TIMEOUT_SECONDS` | `60.0` | Upstream request timeout. |
 | `FANOUT_DOTENV_PATH` | `.env` | Path to the dotenv file to load. |
 
