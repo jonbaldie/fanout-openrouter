@@ -89,6 +89,46 @@ When a request includes `tools`, the fan-out and synthesis process still applies
 2. **Serialization:** If a candidate decides to invoke a tool, its tool call is serialized into a text block (e.g., `[Tool Call: get_weather({"city": "Paris"})]`) so the synthesizer can evaluate the intent.
 3. **Synthesis & Execution:** The synthesis model receives the candidate responses (including the serialized tool calls) along with the original tool schemas. It is instructed to evaluate the candidates' intents and, if appropriate, execute the final tool call natively. This ensures strict schema adherence for the downstream client.
 
+
+## Opencode Integration
+
+To point your local installation of `opencode` at the running `fan-out-openrouter` facade, you need to define a custom provider in your `opencode.json` configuration file (typically located at `~/.config/opencode.json`).
+
+Here is the exact structure you need to add. It uses the `@ai-sdk/openai-compatible` provider adapter which speaks the standard OpenAI wire format (which OpenRouter and our facade also speak).
+
+```json
+{
+  "provider": {
+    "fanoutlocal": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Fan-Out OpenRouter",
+      "options": {
+        "baseURL": "http://127.0.0.1:8000/api/v1",
+        "apiKey": "{env:OPENROUTER_API_KEY}"
+      },
+      "models": {
+        "fanout/minimal": {
+          "name": "Fanout Minimal (Local)"
+        }
+      }
+    }
+  }
+}
+```
+
+#### What this does:
+1. **`fanoutlocal`** is the ID of the provider you are registering.
+2. **`baseURL`** points to your local facade's API endpoint (change the port if your local server runs on something other than `8000`).
+3. **`apiKey`** uses `{env:OPENROUTER_API_KEY}`. This is a very handy opencode feature that pulls the API key securely from your environment variables rather than hardcoding it in the JSON file. Our facade requires a valid OpenRouter API key so it can pass the requests upstream.
+4. **`models`** explicitly lists the virtual models that the facade exposes so that they show up in `opencode models` and can be routed to.
+
+#### How to use it:
+Once this is in your config and your facade is running locally (`uv run uvicorn fanout_openrouter.app:app`), you can invoke opencode to use this new provider and model like so:
+
+```bash
+OPENROUTER_API_KEY="sk-or-..." opencode run --model fanoutlocal/fanout/minimal "Read my README.md file and summarize it."
+```
+
 ## Development and Testing
 
 The project uses `pytest` for testing, `ruff` for linting/formatting, and relies heavily on live smoke testing against OpenRouter to ensure absolute contract parity.
