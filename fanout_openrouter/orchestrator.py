@@ -579,7 +579,8 @@ def build_synthesis_prompt(original_prompt: str, candidates: list[str]) -> str:
     parts = [original_prompt, "\n\n---\n\n"]
     parts.append(
         f"Below are {len(candidates)} candidate responses. "
-        "Synthesize them into a single final answer. If the candidates indicate they wanted to call a tool (shown as [Tool Call: ...]), you MUST execute the corresponding tool using the native tool calling mechanism. You should synthesize the tool call arguments based on the candidates, and you MUST NOT output any text content (no prefix, no reasoning, just the tool call).\n\n"
+        "Synthesize them into a single final answer. If the candidates indicate they wanted to call a tool (shown as [Tool Call: ...]), you MUST execute the corresponding tool using the native tool calling mechanism. You should synthesize the tool call arguments based on the candidates. "
+        "If you use a tool, you should ALSO output a brief, polite text prefix explaining what you are doing (e.g. 'I will check the weather for you.').\n\n"
     )
     for index, candidate in enumerate(candidates, start=1):
         parts.append(

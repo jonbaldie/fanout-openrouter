@@ -83,6 +83,11 @@ def _normalize(value: Any) -> Any:
                 out[key] = "<normalized>"
             elif key == "content" and isinstance(inner, str):
                 out[key] = "<normalized>"
+            elif key == "content" and inner is None:
+                # OpenRouter sometimes returns null for content when there's a tool call,
+                # and sometimes returns an empty string or brief prefix string. Treat all
+                # as normalized content.
+                out[key] = "<normalized>"
             elif key == "usage" and isinstance(inner, dict):
                 out[key] = {uk: "<normalized>" for uk in inner.keys()}
             elif key == "arguments" and isinstance(inner, str):
