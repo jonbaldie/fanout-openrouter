@@ -9,13 +9,26 @@ from .models import ChatMessage
 
 
 class OpenRouterError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retryable: bool = True,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
 
 
 @dataclass(frozen=True)
 class CompletionResult:
     content: str
     model: str
+    provider: str | None
+    system_fingerprint: str | None
+    choice: dict[str, Any]
+    usage: dict[str, Any] | None
 
 
 class OpenRouterClient:
@@ -42,23 +55,26 @@ class OpenRouterClient:
         *,
         model: str,
         messages: list[ChatMessage],
-        temperature: float | None,
+        extra_body: dict[str, Any] | None,
     ) -> CompletionResult:
         payload: dict[str, Any] = {
             "model": model,
             "messages": [message.model_dump(exclude_none=True) for message in messages],
             "stream": False,
         }
-        if temperature is not None:
-            payload["temperature"] = temperature
+        if extra_body:
+            payload.update(extra_body)
 
         try:
             response = await self._client.post("chat/completions", json=payload)
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code
             detail = exc.response.text.strip() or str(exc)
             raise OpenRouterError(
-                f"OpenRouter returned {exc.response.status_code}: {detail}"
+                f"OpenRouter returned {status_code}: {detail}",
+                status_code=status_code,
+                retryable=_is_retryable_status(status_code),
             ) from exc
         except httpx.HTTPError as exc:
             raise OpenRouterError(str(exc)) from exc
@@ -71,7 +87,19 @@ class OpenRouterClient:
         message = choices[0].get("message") or {}
         content = self._extract_content(message)
         model_name = data.get("model") or model
-        return CompletionResult(content=content, model=model_name)
+        provider = data.get("provider")
+        system_fingerprint = data.get("system_fingerprint")
+        usage = data.get("usage")
+        return CompletionResult(
+            content=content,
+            model=model_name,
+            provider=provider if isinstance(provider, str) else None,
+            system_fingerprint=(
+                system_fingerprint if isinstance(system_fingerprint, str) else None
+            ),
+            choice=choices[0],
+            usage=usage if isinstance(usage, dict) else None,
+        )
 
     async def aclose(self) -> None:
         await self._client.aclose()
@@ -92,3 +120,7 @@ class OpenRouterClient:
                 return "".join(text_parts)
 
         raise OpenRouterError("OpenRouter returned a non-text message content payload")
+
+
+def _is_retryable_status(status_code: int) -> bool:
+    return status_code in {408, 409, 429} or status_code >= 500

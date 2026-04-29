@@ -1,0 +1,13 @@
+{
+  "policies": [
+    {
+      "virtual_model": "fanout/minimal",
+      "candidate_models": [
+        "google/gemini-3-flash-preview",
+        "openai/gpt-5.4-nano"
+      ],
+      "fanout_count": 2,
+      "created": 1710000000
+    }
+  ]
+}
