@@ -1181,7 +1181,7 @@ def test_parity_chat_response_format(api_key: str, local_client: TestClient) -> 
     oracle_body = {
         "model": ORACLE_MODEL,
         "messages": [{"role": "user", "content": "Return JSON with a 'status' key."}],
-        "max_tokens": 50,
+        "max_tokens": 500,
         "response_format": {"type": "json_object"},
     }
     local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
