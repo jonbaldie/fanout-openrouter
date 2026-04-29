@@ -3,10 +3,12 @@ import sys
 from logging import Formatter, StreamHandler
 from typing import Any
 
+
 class JsonFormatter(Formatter):
     """
     Format log records as JSON for structured logging.
     """
+
     def format(self, record: logging.LogRecord) -> str:
         log_entry: dict[str, Any] = {
             "level": record.levelname,
@@ -37,18 +39,20 @@ class JsonFormatter(Formatter):
             log_entry["default_model"] = record.default_model
 
         import json
+
         return json.dumps(log_entry)
+
 
 def configure_logging(level: int = logging.INFO, structured: bool = True) -> None:
     """
     Configure the root logger for the application.
     """
     root_logger = logging.getLogger()
-    
+
     # Remove existing handlers to prevent duplicates if called multiple times
     for handler in root_logger.handlers[:]:
         root_logger.removeHandler(handler)
-        
+
     root_logger.setLevel(level)
 
     handler = StreamHandler(sys.stdout)
@@ -62,7 +66,7 @@ def configure_logging(level: int = logging.INFO, structured: bool = True) -> Non
         handler.setFormatter(formatter)
 
     root_logger.addHandler(handler)
-    
+
     # Adjust overly verbose loggers
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
