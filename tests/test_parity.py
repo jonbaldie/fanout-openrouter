@@ -1124,7 +1124,10 @@ def test_parity_chat_tool_calls_stream(api_key: str, local_client: TestClient) -
 
     _log("PASS")
 
-def test_parity_chat_stream_options_include_usage(api_key: str, local_client: TestClient) -> None:
+
+def test_parity_chat_stream_options_include_usage(
+    api_key: str, local_client: TestClient
+) -> None:
     _log("case: chat_stream_options_include_usage")
 
     oracle_body = {
@@ -1148,9 +1151,12 @@ def test_parity_chat_stream_options_include_usage(api_key: str, local_client: Te
     if diffs:
         rendered = "\n  - ".join(diffs)
         _log(f"FAIL: {len(diffs)} diffs")
-        pytest.fail(f"parity drift in chat_stream_options_include_usage:\n  - {rendered}")
+        pytest.fail(
+            f"parity drift in chat_stream_options_include_usage:\n  - {rendered}"
+        )
 
     _log("PASS")
+
 
 def test_parity_chat_response_format(api_key: str, local_client: TestClient) -> None:
     _log("case: chat_response_format")

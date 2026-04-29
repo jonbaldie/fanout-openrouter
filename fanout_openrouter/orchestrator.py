@@ -533,7 +533,6 @@ def serialize_messages(messages: list[ChatMessage]) -> str:
     return "\n\n".join(blocks)
 
 
-
 def _format_candidate_response(candidate: CompletionResult) -> str:
     parts = []
     if candidate.content:
@@ -547,6 +546,7 @@ def _format_candidate_response(candidate: CompletionResult) -> str:
     if not parts:
         return "[Empty response]"
     return "\n".join(parts)
+
 
 def build_synthesis_prompt(original_prompt: str, candidates: list[str]) -> str:
     parts = [original_prompt, "\n\n---\n\n"]
