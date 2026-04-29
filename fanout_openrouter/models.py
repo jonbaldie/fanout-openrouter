@@ -21,16 +21,16 @@ class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     def candidate_request_body(self) -> dict[str, Any]:
-        return self.model_dump(
+        body = self.model_dump(
             exclude_none=True,
             exclude={"model", "messages", "stream"},
         )
+        body.pop("n", None)
+        return body
 
     def synthesis_request_body(self) -> dict[str, Any]:
         body = self.candidate_request_body()
         for key in (
-            "n",
-            "response_format",
             "tool_choice",
             "tools",
             "parallel_tool_calls",

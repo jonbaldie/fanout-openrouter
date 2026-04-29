@@ -1123,3 +1123,58 @@ def test_parity_chat_tool_calls_stream(api_key: str, local_client: TestClient) -
         pytest.fail(f"parity drift in chat_tool_calls_stream:\n  - {rendered}")
 
     _log("PASS")
+
+def test_parity_chat_stream_options_include_usage(api_key: str, local_client: TestClient) -> None:
+    _log("case: chat_stream_options_include_usage")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter stream with options")
+    oracle = _capture_oracle_stream(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade stream with options")
+    local = _capture_local_stream(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing stream snapshots")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_stream_options_include_usage:\n  - {rendered}")
+
+    _log("PASS")
+
+def test_parity_chat_response_format(api_key: str, local_client: TestClient) -> None:
+    _log("case: chat_response_format")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "Return JSON with a 'status' key."}],
+        "max_tokens": 50,
+        "response_format": {"type": "json_object"},
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter with response_format")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade with response_format")
+    local = _capture_local_json(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_response_format:\n  - {rendered}")
+
+    _log("PASS")
