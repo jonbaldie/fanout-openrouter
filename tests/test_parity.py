@@ -28,6 +28,7 @@ import json
 import sys
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -518,6 +519,71 @@ def test_parity_chat_invalid_bearer_error(
         rendered = "\n  - ".join(diffs)
         _log(f"FAIL: {len(diffs)} diffs")
         pytest.fail(f"parity drift in chat_invalid_bearer_error:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_unknown_submodel_error(
+    api_key: str,
+    tmp_path: Path,
+) -> None:
+    """
+    When a virtual model's candidate pool is a nonexistent OpenRouter model,
+    all candidates fail with the same upstream 400. Our facade should pass
+    that error through unchanged so the wire contract matches OpenRouter's
+    own 400 for an unknown model ID.
+    """
+    _log("case: chat_unknown_submodel_error")
+
+    unknown_model = "does-not-exist/nope"
+    policy_path = tmp_path / "unknown_model_policy.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "policies": [
+                    {
+                        "virtual_model": "fanout/unknown-submodel",
+                        "candidate_models": [unknown_model],
+                        "fanout_count": 2,
+                        "created": 1710000000,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = Settings.from_env()
+    settings = Settings(
+        openrouter_api_key=loaded.openrouter_api_key,
+        openrouter_base_url=loaded.openrouter_base_url,
+        request_timeout_seconds=loaded.request_timeout_seconds,
+        policy_file=str(policy_path),
+    )
+    app = create_app(settings=settings)
+    client = TestClient(app)
+    client.headers.update({"Authorization": f"Bearer {api_key}"})
+
+    oracle_body = {
+        "model": unknown_model,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+    }
+    local_body = {**oracle_body, "model": "fanout/unknown-submodel"}
+
+    _log("step 1/3: hitting real OpenRouter with unknown model")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade with unknown sub-model policy")
+    local = _capture_local_json(client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_unknown_submodel_error:\n  - {rendered}")
 
     _log("PASS")
 
