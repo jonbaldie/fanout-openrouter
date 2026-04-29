@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "fan_out_openrouter",
+  "project_id": "f4b01ecd-be15-4222-8914-ebe5a766d342"
+}
