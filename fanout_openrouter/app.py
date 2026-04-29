@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 from typing import AsyncIterator
+from collections import defaultdict
 
 import httpx
 from fastapi import FastAPI, Header, Request
@@ -32,6 +33,37 @@ from .settings import Settings
 from .logging import configure_logging
 
 configure_logging(structured=False)  # Can be made configurable via env later
+
+
+class RateLimiter:
+    def __init__(self, requests_per_minute: int):
+        self.requests_per_minute = requests_per_minute
+        self.window_size = 60.0
+        self.users: dict[str, list[float]] = defaultdict(list)
+
+    def is_allowed(self, user_id: str) -> bool:
+        if self.requests_per_minute <= 0:
+            return True
+
+        now = time.monotonic()
+        user_timestamps = self.users[user_id]
+
+        # Keep only timestamps within the window
+        valid_idx = 0
+        for i, ts in enumerate(user_timestamps):
+            if now - ts <= self.window_size:
+                valid_idx = i
+                break
+        else:
+            valid_idx = len(user_timestamps)
+
+        del user_timestamps[:valid_idx]
+
+        if len(user_timestamps) >= self.requests_per_minute:
+            return False
+
+        user_timestamps.append(now)
+        return True
 
 
 class FanoutAPIError(RuntimeError):
@@ -62,6 +94,7 @@ def create_app(
     app.state.transport = transport
     app.state.sleep_func = sleep_func
     app.state.policy_registry = PolicyRegistry.from_file(resolved_settings.policy_file)
+    app.state.rate_limiter = RateLimiter(resolved_settings.rate_limit_rpm)
 
     @app.exception_handler(FanoutAPIError)
     async def handle_fanout_api_error(
@@ -112,6 +145,13 @@ def create_app(
                 401,
                 "No cookie auth credentials found",
                 code=401,
+            )
+
+        if not app.state.rate_limiter.is_allowed(api_key):
+            raise FanoutAPIError(
+                429,
+                "Too many requests",
+                code=429,
             )
 
         client = OpenRouterClient(

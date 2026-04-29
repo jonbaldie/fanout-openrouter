@@ -519,10 +519,28 @@ def _shared_upstream_client_error(
     )
 
 
+import random
+
+
 def distribute_models(model_pool: list[str], n: int) -> list[str]:
     if not model_pool:
         return ["anthropic/claude-sonnet-4"] * n
-    return [model_pool[index % len(model_pool)] for index in range(n)]
+
+    # If we need exactly the pool size, just shuffle it
+    if n == len(model_pool):
+        return random.sample(model_pool, k=n)
+
+    # If we need fewer, pick a random subset
+    if n < len(model_pool):
+        return random.sample(model_pool, k=n)
+
+    # If we need more than the pool has, round-robin but with shuffled bases
+    # to ensure load is spread evenly across all upstream models over time
+    result = []
+    while len(result) < n:
+        chunk = random.sample(model_pool, k=min(len(model_pool), n - len(result)))
+        result.extend(chunk)
+    return result
 
 
 def serialize_messages(messages: list[ChatMessage]) -> str:

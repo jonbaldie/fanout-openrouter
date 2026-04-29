@@ -40,6 +40,7 @@ class Settings:
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     request_timeout_seconds: float = 60.0
     policy_file: str = str(_default_policy_path())
+    rate_limit_rpm: int = 60
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -50,9 +51,11 @@ class Settings:
         base_url = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
         timeout = float(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "60"))
         policy_file = os.getenv("FANOUT_POLICY_FILE", str(_default_policy_path()))
+        rate_limit_rpm = int(os.getenv("FANOUT_RATE_LIMIT_RPM", "60"))
         return cls(
             openrouter_api_key=api_key,
             openrouter_base_url=base_url,
             request_timeout_seconds=timeout,
             policy_file=policy_file,
+            rate_limit_rpm=rate_limit_rpm,
         )
