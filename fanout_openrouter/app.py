@@ -87,10 +87,7 @@ def create_app(
     async def list_models() -> ModelsResponse:
         registry = app.state.policy_registry
         return ModelsResponse(
-            data=[
-                ModelCard(id=policy.virtual_model, created=policy.created)
-                for policy in registry.list()
-            ]
+            data=[_virtual_model_card(policy) for policy in registry.list()]
         )
 
     @app.post("/api/v1/chat/completions", response_model=ChatCompletionResponse)
@@ -174,6 +171,52 @@ def create_app(
         )
 
     return app
+
+
+def _virtual_model_card(policy) -> ModelCard:  # type: ignore[no-untyped-def]
+    return ModelCard(
+        id=policy.virtual_model,
+        canonical_slug=policy.virtual_model,
+        hugging_face_id="",
+        name=policy.virtual_model,
+        created=policy.created,
+        description=(
+            f"Virtual fan-out model '{policy.virtual_model}' that fans out to "
+            f"candidate models and synthesizes their responses."
+        ),
+        context_length=None,
+        architecture={
+            "modality": "text->text",
+            "input_modalities": ["text"],
+            "output_modalities": ["text"],
+            "tokenizer": "Unknown",
+            "instruct_type": None,
+        },
+        pricing={"prompt": "0", "completion": "0"},
+        top_provider={
+            "context_length": None,
+            "max_completion_tokens": None,
+            "is_moderated": False,
+        },
+        per_request_limits=None,
+        supported_parameters=[
+            "max_tokens",
+            "messages",
+            "stream",
+            "temperature",
+        ],
+        default_parameters={
+            "temperature": None,
+            "top_p": None,
+            "top_k": None,
+            "frequency_penalty": None,
+            "presence_penalty": None,
+            "repetition_penalty": None,
+        },
+        knowledge_cutoff=None,
+        expiration_date=None,
+        links={},
+    )
 
 
 def _extract_bearer_token(authorization: str | None) -> str | None:

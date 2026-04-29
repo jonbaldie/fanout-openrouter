@@ -163,8 +163,16 @@ def test_models_endpoint_lists_virtual_models() -> None:
 
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["object"] == "list"
+    # OpenRouter's /models envelope is just {"data": [...]}; no top-level
+    # "object" key.
+    assert "object" not in body
     assert [entry["id"] for entry in body["data"]] == ["fanout/minimal"]
+    entry = body["data"][0]
+    # Sanity-check a few OpenRouter-shaped fields we now emit.
+    assert entry["canonical_slug"] == "fanout/minimal"
+    assert "architecture" in entry
+    assert "pricing" in entry
+    assert "supported_parameters" in entry
 
 
 def test_unsupported_virtual_model_returns_structured_error() -> None:

@@ -89,12 +89,31 @@ class ErrorResponse(BaseModel):
 
 
 class ModelCard(BaseModel):
+    """
+    OpenRouter-shaped model catalog item. Values for fields we don't track
+    internally are set to sensible null-ish defaults to preserve the wire
+    shape of /models.
+    """
+
     id: str
-    object: Literal["model"] = "model"
+    canonical_slug: str
+    hugging_face_id: str | None = ""
+    name: str
     created: int
-    owned_by: str = "fan-out-openrouter"
+    description: str = ""
+    context_length: int | None = None
+    architecture: dict[str, Any] = {}
+    pricing: dict[str, Any] = {}
+    top_provider: dict[str, Any] = {}
+    per_request_limits: dict[str, Any] | None = None
+    supported_parameters: list[str] = []
+    default_parameters: dict[str, Any] = {}
+    knowledge_cutoff: str | int | None = None
+    expiration_date: str | None = None
+    links: dict[str, Any] = {}
+
+    model_config = ConfigDict(extra="allow")
 
 
 class ModelsResponse(BaseModel):
-    object: Literal["list"] = "list"
     data: list[ModelCard]

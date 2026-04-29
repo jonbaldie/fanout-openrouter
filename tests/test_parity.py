@@ -102,13 +102,15 @@ def _capture_oracle_json(
     api_key: str,
     path: str,
     body: dict[str, Any] | None,
+    method: str = "POST",
 ) -> Snapshot:
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
-    _log(f"oracle POST {OPENROUTER_BASE_URL}{path}")
-    response = httpx.post(
+    _log(f"oracle {method} {OPENROUTER_BASE_URL}{path}")
+    response = httpx.request(
+        method,
         f"{OPENROUTER_BASE_URL}{path}",
         headers=headers,
         json=body,
@@ -133,14 +135,18 @@ def _capture_local_json(
     body: dict[str, Any] | None,
     timeout: float = 90.0,
     headers: dict[str, str] | None = None,
+    method: str = "POST",
 ) -> Snapshot:
-    _log(f"local POST {path} (timeout={timeout}s)")
+    _log(f"local {method} {path} (timeout={timeout}s)")
 
     result: dict[str, Any] = {}
 
     def _do_call() -> None:
         try:
-            response = client.post(path, json=body, headers=headers)
+            if method == "GET":
+                response = client.get(path, headers=headers)
+            else:
+                response = client.post(path, json=body, headers=headers)
             result["response"] = response
         except Exception as exc:  # noqa: BLE001
             result["error"] = exc
@@ -512,5 +518,84 @@ def test_parity_chat_invalid_bearer_error(
         rendered = "\n  - ".join(diffs)
         _log(f"FAIL: {len(diffs)} diffs")
         pytest.fail(f"parity drift in chat_invalid_bearer_error:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_models_list_shape(local_client: TestClient) -> None:
+    """
+    OpenRouter's /models catalog is enormous and dynamic; we can't mirror its
+    contents. But the wire contract we expose must match: same top-level
+    envelope keys, and each model item must carry the same shape (same keys).
+
+    This test diffs the envelope keys and the union of per-item keys.
+    """
+    _log("case: models_list_shape")
+
+    _log("step 1/3: hitting real OpenRouter /models")
+    oracle = _capture_oracle_json("", "/models", None, method="GET")
+
+    _log("step 2/3: hitting local facade /models")
+    local = _capture_local_json(
+        local_client,
+        "/api/v1/models",
+        None,
+        method="GET",
+    )
+
+    _log("step 3/3: diffing envelope and item shape")
+    problems: list[str] = []
+
+    if oracle.status != local.status:
+        problems.append(f"status mismatch: oracle={oracle.status} local={local.status}")
+    if oracle.content_type != local.content_type:
+        problems.append(
+            "content-type mismatch: "
+            f"oracle={oracle.content_type!r} local={local.content_type!r}"
+        )
+
+    oracle_body = oracle.json_body
+    local_body = local.json_body
+    if not isinstance(oracle_body, dict) or not isinstance(local_body, dict):
+        pytest.fail(
+            f"unexpected /models body types: oracle={type(oracle_body).__name__} "
+            f"local={type(local_body).__name__}"
+        )
+
+    oracle_keys = set(oracle_body.keys())
+    local_keys = set(local_body.keys())
+    for missing in sorted(oracle_keys - local_keys):
+        problems.append(f"envelope.{missing}: present in oracle, missing locally")
+    for extra in sorted(local_keys - oracle_keys):
+        problems.append(f"envelope.{extra}: present locally, missing in oracle")
+
+    oracle_items = oracle_body.get("data") or []
+    local_items = local_body.get("data") or []
+    if not isinstance(oracle_items, list) or not oracle_items:
+        pytest.fail("oracle /models returned empty or invalid data list")
+    if not isinstance(local_items, list) or not local_items:
+        pytest.fail("local /models returned empty or invalid data list")
+
+    oracle_item_keys = set(oracle_items[0].keys())
+    for index, item in enumerate(local_items):
+        if not isinstance(item, dict):
+            problems.append(f"data[{index}]: not an object")
+            continue
+        item_keys = set(item.keys())
+        missing = oracle_item_keys - item_keys
+        extra = item_keys - oracle_item_keys
+        for key in sorted(missing):
+            problems.append(
+                f"data[{index}].{key}: present in oracle items, missing locally"
+            )
+        for key in sorted(extra):
+            problems.append(
+                f"data[{index}].{key}: present locally, missing in oracle items"
+            )
+
+    if problems:
+        rendered = "\n  - ".join(problems)
+        _log(f"FAIL: {len(problems)} diffs")
+        pytest.fail(f"parity drift in models_list_shape:\n  - {rendered}")
 
     _log("PASS")
