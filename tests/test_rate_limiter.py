@@ -1,4 +1,3 @@
-import pytest
 from fastapi.testclient import TestClient
 from fanout_openrouter.app import create_app
 from fanout_openrouter.settings import Settings

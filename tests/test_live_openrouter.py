@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from typing import Any, AsyncIterator
 
 import pytest
 from fastapi.testclient import TestClient
