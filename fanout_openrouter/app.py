@@ -20,7 +20,6 @@ from .models import (
     ErrorResponse,
     ModelCard,
     ModelsResponse,
-    ResponseMessage,
 )
 from .openrouter_client import OpenRouterClient
 from .orchestrator import (
@@ -119,6 +118,18 @@ def create_app(
             transport=app.state.transport,
         )
         service = SynthesizerService(client, sleep_func=app.state.sleep_func)
+        response_id = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+
+        if request.stream:
+            return await _handle_streaming(
+                service=service,
+                client=client,
+                request=request,
+                policy=policy,
+                response_id=response_id,
+                created=created,
+            )
 
         try:
             result = await service.complete_chat(request, policy)
@@ -137,29 +148,6 @@ def create_app(
         finally:
             await client.aclose()
 
-        response_id = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
-
-        if request.stream:
-            return StreamingResponse(
-                _stream_chat_completion(
-                    response_id=response_id,
-                    created=created,
-                    model=result.model,
-                    provider=result.provider,
-                    system_fingerprint=result.system_fingerprint,
-                    choice=result.choice,
-                    content=result.content,
-                    usage=result.usage,
-                ),
-                media_type="text/event-stream",
-                headers={
-                    "Cache-Control": "no-cache",
-                    "Connection": "keep-alive",
-                    "X-Accel-Buffering": "no",
-                },
-            )
-
         return ChatCompletionResponse(
             id=response_id,
             created=created,
@@ -171,6 +159,159 @@ def create_app(
         )
 
     return app
+
+
+async def _handle_streaming(
+    *,
+    service,
+    client,
+    request: ChatCompletionRequest,
+    policy,
+    response_id: str,
+    created: int,
+) -> StreamingResponse:
+    """
+    Consume the synthesizer's streaming iterator. Pre-roll the first chunk
+    (which comes bundled with the preamble) before returning the response
+    so that upstream auth / routing errors surface as JSON, not SSE.
+    OpenRouter does the same: stream=true with bad auth yields a plain JSON
+    error, not an SSE body.
+    """
+    stream_iter = service.stream_chat(request, policy).__aiter__()
+
+    try:
+        preamble_item = await stream_iter.__anext__()
+    except UpstreamClientError as exc:
+        await client.aclose()
+        raise FanoutAPIError(
+            exc.status_code,
+            exc.message,
+            code=exc.code,
+        ) from exc
+    except AllCandidatesFailedError as exc:
+        await client.aclose()
+        raise FanoutAPIError(
+            502,
+            str(exc),
+            code="all_candidates_failed",
+        ) from exc
+    except StopAsyncIteration:
+        await client.aclose()
+        raise FanoutAPIError(
+            502,
+            "synthesizer produced no output",
+            code="empty_stream",
+        ) from None
+
+    preamble, first_chunk = preamble_item
+    if preamble is None:
+        await client.aclose()
+        raise FanoutAPIError(
+            500,
+            "synthesizer stream missing preamble",
+            code="internal_error",
+        )
+
+    async def body() -> AsyncIterator[str]:
+        try:
+            # Emit the initial role-only frame derived from the preamble
+            # and, if present, the first upstream chunk. OpenRouter always
+            # opens a stream with a role delta; doing the same keeps
+            # clients that expect that pattern happy.
+            initial_role = _role_from_chunk(first_chunk) or "assistant"
+            yield _sse_data(
+                _stream_chunk_payload(
+                    response_id=response_id,
+                    created=created,
+                    model=preamble.model,
+                    provider=preamble.provider,
+                    system_fingerprint=preamble.system_fingerprint,
+                    delta={"role": initial_role, "content": ""},
+                    finish_reason=None,
+                    native_finish_reason=None,
+                )
+            )
+
+            if first_chunk is not None:
+                yield _sse_data(
+                    _restamp_upstream_chunk(
+                        first_chunk,
+                        response_id=response_id,
+                        created=created,
+                        preamble=preamble,
+                    )
+                )
+
+            async for preamble_next, chunk in stream_iter:
+                if chunk is None:
+                    continue
+                yield _sse_data(
+                    _restamp_upstream_chunk(
+                        chunk,
+                        response_id=response_id,
+                        created=created,
+                        preamble=preamble,
+                    )
+                )
+
+            yield _sse_data("[DONE]")
+        finally:
+            await client.aclose()
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _role_from_chunk(chunk: dict[str, object] | None) -> str | None:
+    if not isinstance(chunk, dict):
+        return None
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return None
+    role = delta.get("role")
+    return role if isinstance(role, str) and role else None
+
+
+def _restamp_upstream_chunk(
+    chunk: dict[str, object],
+    *,
+    response_id: str,
+    created: int,
+    preamble,
+) -> dict[str, object]:
+    """
+    Rewrite id / created / model / provider / system_fingerprint so the
+    client sees our facade's identity, not the upstream's. Everything else
+    (choices, finish_reason, usage, reasoning, etc.) is forwarded as-is
+    so we preserve the upstream's wire shape intact.
+    """
+    copy = dict(chunk)
+    copy["id"] = response_id
+    copy["object"] = "chat.completion.chunk"
+    copy["created"] = created
+    copy["model"] = preamble.model
+    if preamble.provider is not None:
+        copy["provider"] = preamble.provider
+    else:
+        copy.pop("provider", None)
+    if preamble.system_fingerprint is not None:
+        copy["system_fingerprint"] = preamble.system_fingerprint
+    else:
+        copy.pop("system_fingerprint", None)
+    return copy
 
 
 def _virtual_model_card(policy) -> ModelCard:  # type: ignore[no-untyped-def]
@@ -226,109 +367,6 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     if scheme.lower() != "bearer" or not token:
         return None
     return token
-
-
-async def _stream_chat_completion(
-    *,
-    response_id: str,
-    created: int,
-    model: str,
-    provider: str | None,
-    system_fingerprint: str | None,
-    choice: dict[str, object],
-    content: str,
-    usage: dict[str, object] | None,
-) -> AsyncIterator[str]:
-    message = choice.get("message")
-    if not isinstance(message, dict):
-        message = {}
-
-    assistant_role = message.get("role")
-    if not isinstance(assistant_role, str) or not assistant_role:
-        assistant_role = "assistant"
-
-    initial_delta = {"content": "", "role": assistant_role}
-    if "reasoning" in message:
-        initial_delta["reasoning"] = message.get("reasoning")
-    if "reasoning_details" in message:
-        initial_delta["reasoning_details"] = message.get("reasoning_details")
-
-    yield _sse_data(
-        _stream_chunk_payload(
-            response_id=response_id,
-            created=created,
-            model=model,
-            provider=provider,
-            system_fingerprint=system_fingerprint,
-            delta=initial_delta,
-            finish_reason=None,
-            native_finish_reason=None,
-        )
-    )
-
-    for piece in _stream_content_pieces(content):
-        yield _sse_data(
-            _stream_chunk_payload(
-                response_id=response_id,
-                created=created,
-                model=model,
-                provider=provider,
-                system_fingerprint=system_fingerprint,
-                delta={"content": piece, "role": assistant_role},
-                finish_reason=None,
-                native_finish_reason=None,
-            )
-        )
-
-    final_delta = {"content": "", "role": assistant_role}
-    if "reasoning" in message:
-        final_delta["reasoning"] = message.get("reasoning")
-
-    finish_reason = choice.get("finish_reason")
-    if not isinstance(finish_reason, str) or not finish_reason:
-        finish_reason = "stop"
-
-    native_finish_reason = choice.get("native_finish_reason")
-    if native_finish_reason is not None and not isinstance(native_finish_reason, str):
-        native_finish_reason = None
-
-    terminal_chunk = _stream_chunk_payload(
-        response_id=response_id,
-        created=created,
-        model=model,
-        provider=provider,
-        system_fingerprint=system_fingerprint,
-        delta=final_delta,
-        finish_reason=finish_reason,
-        native_finish_reason=native_finish_reason,
-    )
-    yield _sse_data(terminal_chunk)
-    if usage:
-        yield _sse_data(
-            {
-                **_stream_chunk_payload(
-                    response_id=response_id,
-                    created=created,
-                    model=model,
-                    provider=provider,
-                    system_fingerprint=system_fingerprint,
-                    delta={"content": "", "role": assistant_role},
-                    finish_reason=finish_reason,
-                    native_finish_reason=native_finish_reason,
-                ),
-                "usage": usage,
-            }
-        )
-    yield _sse_data("[DONE]")
-
-
-def _stream_content_pieces(content: str, chunk_size: int = 64) -> list[str]:
-    if not content:
-        return []
-    return [
-        content[index : index + chunk_size]
-        for index in range(0, len(content), chunk_size)
-    ]
 
 
 def _stream_chunk_payload(

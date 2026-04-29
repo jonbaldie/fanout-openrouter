@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
-from typing import Any
+from typing import Any, AsyncIterator
 
 import httpx
 
@@ -109,6 +109,87 @@ class OpenRouterClient:
             usage=usage if isinstance(usage, dict) else None,
         )
 
+    async def stream_chat_completion(
+        self,
+        *,
+        model: str,
+        messages: list[ChatMessage],
+        extra_body: dict[str, Any] | None,
+    ) -> AsyncIterator[dict[str, Any]]:
+        """
+        Open a streaming chat completion against OpenRouter and yield each
+        parsed data frame as a dict. The `[DONE]` sentinel is consumed and
+        terminates the iterator. Upstream errors raised before the stream
+        opens are surfaced as OpenRouterError with the same semantics as
+        the non-streaming path, so the caller can retry or fall back.
+        """
+        payload: dict[str, Any] = {
+            "model": model,
+            "messages": [message.model_dump(exclude_none=True) for message in messages],
+            "stream": True,
+        }
+        if extra_body:
+            payload.update(extra_body)
+
+        request = self._client.build_request("POST", "chat/completions", json=payload)
+        try:
+            response = await self._client.send(request, stream=True)
+        except httpx.HTTPError as exc:
+            raise OpenRouterError(str(exc)) from exc
+
+        try:
+            if response.status_code >= 400:
+                body_bytes = await response.aread()
+                detail = body_bytes.decode("utf-8", errors="replace").strip() or str(
+                    response.status_code
+                )
+                upstream_message, upstream_code = _extract_upstream_error_from_body(
+                    body_bytes
+                )
+                raise OpenRouterError(
+                    f"OpenRouter returned {response.status_code}: {detail}",
+                    status_code=response.status_code,
+                    retryable=_is_retryable_status(response.status_code),
+                    upstream_message=upstream_message,
+                    upstream_code=upstream_code,
+                )
+
+            async for line in response.aiter_lines():
+                if not line or not line.startswith("data: "):
+                    continue
+                payload_str = line[len("data: ") :]
+                if payload_str == "[DONE]":
+                    return
+                try:
+                    parsed = json.loads(payload_str)
+                except ValueError:
+                    # OpenRouter occasionally sends keep-alive comments or
+                    # malformed fragments; skip them rather than abort.
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                # Mid-stream error frames. OpenRouter reports these inline.
+                error = parsed.get("error")
+                if isinstance(error, dict):
+                    message = error.get("message")
+                    code = error.get("code")
+                    status_code = code if isinstance(code, int) else None
+                    raise OpenRouterError(
+                        f"OpenRouter streamed error: "
+                        f"{message if isinstance(message, str) else parsed}",
+                        status_code=status_code,
+                        retryable=(
+                            _is_retryable_status(status_code)
+                            if status_code is not None
+                            else True
+                        ),
+                        upstream_message=message if isinstance(message, str) else None,
+                        upstream_code=code if isinstance(code, (int, str)) else None,
+                    )
+                yield parsed
+        finally:
+            await response.aclose()
+
     async def aclose(self) -> None:
         await self._client.aclose()
 
@@ -141,7 +222,22 @@ def _extract_upstream_error(
         body = response.json()
     except (ValueError, json.JSONDecodeError):
         return None, None
+    return _upstream_error_fields(body)
 
+
+def _extract_upstream_error_from_body(
+    body_bytes: bytes,
+) -> tuple[str | None, int | str | None]:
+    try:
+        body = json.loads(body_bytes.decode("utf-8", errors="replace"))
+    except (ValueError, UnicodeDecodeError):
+        return None, None
+    return _upstream_error_fields(body)
+
+
+def _upstream_error_fields(
+    body: Any,
+) -> tuple[str | None, int | str | None]:
     if not isinstance(body, dict):
         return None, None
 

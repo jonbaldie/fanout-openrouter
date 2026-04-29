@@ -25,12 +25,14 @@ The goal isn't "same bytes". It's "same wire contract".
 from __future__ import annotations
 
 import json
+import socket
+import subprocess
 import sys
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import httpx
 import pytest
@@ -801,58 +803,42 @@ def _capture_stream_timing_oracle(
     return _finalize_timing(event_times, content_times)
 
 
-def _capture_stream_timing_local(
-    client: TestClient,
+def _capture_stream_timing_local_http(
+    base_url: str,
     body: dict[str, Any],
-    timeout: float = 120.0,
 ) -> StreamTiming:
+    """
+    Measure local stream timing against a real HTTP server. TestClient's
+    sync-to-async bridge buffers SSE responses in practice, which masks
+    whether the facade is actually streaming. A subprocess-hosted uvicorn
+    preserves the real wire behavior so this measurement reflects what
+    actual clients experience.
+    """
     event_times: list[float] = []
     content_times: list[float] = []
-    result: dict[str, Any] = {}
-    _log("local STREAM POST /api/v1/chat/completions (timing)")
-
-    def _do_call() -> None:
-        try:
-            start = time.monotonic()
-            with client.stream(
-                "POST",
-                "/api/v1/chat/completions",
-                json=body,
-            ) as response:
-                result["status_code"] = response.status_code
-                if response.status_code != 200:
-                    result["error_body"] = response.read()
-                    return
-                for line in response.iter_lines():
-                    if not line.startswith("data: "):
-                        continue
-                    elapsed = time.monotonic() - start
-                    event_times.append(elapsed)
-                    payload = line.removeprefix("data: ")
-                    if payload == "[DONE]":
-                        continue
-                    try:
-                        parsed = json.loads(payload)
-                    except ValueError:
-                        continue
-                    if _event_has_content(parsed):
-                        content_times.append(elapsed)
-        except Exception as exc:  # noqa: BLE001
-            result["error"] = exc
-
-    thread = threading.Thread(target=_do_call, daemon=True)
-    thread.start()
-    thread.join(timeout=timeout)
-
-    if thread.is_alive():
-        raise AssertionError(f"local facade did not finish streaming within {timeout}s")
-    if "error" in result:
-        raise result["error"]
-    if result.get("status_code") != 200:
-        raise AssertionError(
-            f"local stream returned status={result.get('status_code')} "
-            f"body={result.get('error_body')!r}"
-        )
+    _log(f"local STREAM POST {base_url}/chat/completions (timing)")
+    start = time.monotonic()
+    with httpx.stream(
+        "POST",
+        f"{base_url}/chat/completions",
+        json=body,
+        timeout=120.0,
+    ) as response:
+        assert response.status_code == 200, response.read()
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            elapsed = time.monotonic() - start
+            event_times.append(elapsed)
+            payload = line.removeprefix("data: ")
+            if payload == "[DONE]":
+                continue
+            try:
+                parsed = json.loads(payload)
+            except ValueError:
+                continue
+            if _event_has_content(parsed):
+                content_times.append(elapsed)
     return _finalize_timing(event_times, content_times)
 
 
@@ -926,9 +912,69 @@ def _assert_progressive(label: str, timing: StreamTiming) -> None:
         pytest.fail(f"{label} stream is not progressive:\n  - {rendered}")
 
 
+@pytest.fixture(scope="module")
+def local_http_server(api_key: str) -> Iterator[str]:
+    """
+    Spawn a real uvicorn subprocess so streaming measurements reflect
+    actual wire behavior. TestClient is not adequate for streaming: its
+    sync bridge buffers SSE bodies before handing them back.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+
+    _log(f"spawning uvicorn on 127.0.0.1:{port}")
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "fanout_openrouter.app:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--log-level",
+            "warning",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.STDOUT,
+    )
+
+    base_url = f"http://127.0.0.1:{port}/api/v1"
+    deadline = time.monotonic() + 20.0
+    ready = False
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            break
+        try:
+            response = httpx.get(f"{base_url}/models", timeout=1.0)
+            if response.status_code == 200:
+                ready = True
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.2)
+
+    if not ready:
+        process.terminate()
+        process.wait(timeout=5)
+        raise AssertionError("local uvicorn did not become ready within 20s")
+
+    try:
+        yield base_url
+    finally:
+        process.terminate()
+        try:
+            process.wait(timeout=10.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+
+
 def test_parity_chat_stream_is_progressive(
     api_key: str,
-    local_client: TestClient,
+    local_http_server: str,
 ) -> None:
     """
     Real OpenRouter streams deltas as tokens are produced. Our facade must
@@ -955,7 +1001,7 @@ def test_parity_chat_stream_is_progressive(
     _assert_progressive("oracle", oracle_timing)
 
     _log("step 2/2: measuring local facade stream")
-    local_timing = _capture_stream_timing_local(local_client, local_body)
+    local_timing = _capture_stream_timing_local_http(local_http_server, local_body)
     _assert_progressive("local", local_timing)
 
     _log("PASS")

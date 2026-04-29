@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
-from typing import Awaitable, Callable, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from .models import ChatCompletionRequest, ChatMessage
 from .openrouter_client import CompletionResult, OpenRouterError
@@ -22,6 +22,14 @@ class CompletionClient(Protocol):
         messages: list[ChatMessage],
         extra_body: dict[str, object] | None,
     ) -> CompletionResult: ...
+
+    def stream_chat_completion(
+        self,
+        *,
+        model: str,
+        messages: list[ChatMessage],
+        extra_body: dict[str, object] | None,
+    ) -> AsyncIterator[dict[str, Any]]: ...
 
 
 class AllCandidatesFailedError(RuntimeError):
@@ -59,6 +67,17 @@ class OrchestratedResponse:
 class CandidateFailure:
     message: str
     last_exception: OpenRouterError | None
+
+
+@dataclass(frozen=True)
+class StreamPreamble:
+    """Identity chosen for the final streamed response, emitted before any
+    upstream deltas so the caller can shape the first SSE chunk."""
+
+    model: str
+    provider: str | None
+    system_fingerprint: str | None
+    synthesized: bool
 
 
 class SynthesizerService:
@@ -165,6 +184,190 @@ class SynthesizerService:
             usage=final_result.usage,
             synthesized=True,
         )
+
+    async def stream_chat(
+        self,
+        request: ChatCompletionRequest,
+        policy: FanoutPolicy,
+    ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | None]]:
+        """
+        Run candidates to completion, then stream the synthesis call's
+        deltas as they arrive upstream. The iterator yields a sequence of
+        `(preamble, chunk)` pairs:
+
+          - exactly one leading pair where `preamble` is set and `chunk` is
+            None: tells the caller which identity (model/provider) to
+            stamp on outgoing SSE frames.
+          - zero or more pairs where `preamble` is None and `chunk` is a
+            raw upstream delta dict.
+
+        Upstream errors raised before any delta is yielded propagate as
+        UpstreamClientError / AllCandidatesFailedError, matching the
+        non-streaming path so the HTTP layer can turn them into a JSON
+        error response rather than an SSE body.
+
+        If there's only one viable candidate (or synthesis itself fails
+        before emitting any content), we fall back to a buffered stream
+        built from the first candidate so the wire contract stays
+        consistent from the client's perspective.
+        """
+        candidates = await self._run_candidates(request, policy)
+
+        if len(candidates) == 1:
+            candidate = candidates[0]
+            preamble = StreamPreamble(
+                model=candidate.model,
+                provider=candidate.provider,
+                system_fingerprint=candidate.system_fingerprint,
+                synthesized=False,
+            )
+            yield preamble, None
+            for delta in _buffered_deltas(candidate):
+                yield None, delta
+            return
+
+        synthesis_prompt = build_synthesis_prompt(
+            serialize_messages(request.messages),
+            [candidate.content for candidate in candidates],
+        )
+        synthesis_messages = [ChatMessage(role="user", content=synthesis_prompt)]
+        extra_body = request.synthesis_request_body()
+
+        # Attempt the primary synthesis model first. If it fails *before*
+        # emitting any content, transparently fall back to the policy's
+        # default fallback model. Once any delta has been yielded we're
+        # committed - a mid-stream upstream error propagates as-is.
+        primary_model = policy.synthesis_model
+        fallback_model = policy.default_fallback_model
+
+        stream_started = False
+        try:
+            async for item in self._stream_one_synthesis_attempt(
+                synthesis_messages,
+                primary_model,
+                extra_body,
+            ):
+                stream_started = True
+                yield item
+            return
+        except OpenRouterError as exc:
+            if stream_started:
+                raise
+            logger.warning(
+                "synthesis_stream_primary_failed",
+                extra={"model": primary_model, "error": str(exc)},
+            )
+
+        if primary_model != fallback_model:
+            try:
+                async for item in self._stream_one_synthesis_attempt(
+                    synthesis_messages,
+                    fallback_model,
+                    extra_body,
+                ):
+                    stream_started = True
+                    yield item
+                return
+            except OpenRouterError as exc:
+                if stream_started:
+                    raise
+                logger.warning(
+                    "synthesis_stream_fallback_failed",
+                    extra={"model": fallback_model, "error": str(exc)},
+                )
+
+        # Both streamed attempts failed before producing content; emit the
+        # first candidate as a buffered stream so the client still gets a
+        # valid response.
+        logger.warning("synthesis_stream_falling_back_to_candidate")
+        candidate = candidates[0]
+        preamble = StreamPreamble(
+            model=candidate.model,
+            provider=candidate.provider,
+            system_fingerprint=candidate.system_fingerprint,
+            synthesized=False,
+        )
+        yield preamble, None
+        for delta in _buffered_deltas(candidate):
+            yield None, delta
+
+    async def _stream_one_synthesis_attempt(
+        self,
+        synthesis_messages: list[ChatMessage],
+        model: str,
+        extra_body: dict[str, object] | None,
+    ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | None]]:
+        preamble_sent = False
+        saw_content = False
+        async for chunk in self._client.stream_chat_completion(
+            model=model,
+            messages=synthesis_messages,
+            extra_body=extra_body,
+        ):
+            if not preamble_sent:
+                preamble = _preamble_from_chunk(
+                    chunk,
+                    default_model=model,
+                    synthesized=True,
+                )
+                yield preamble, None
+                preamble_sent = True
+            if _chunk_has_content(chunk):
+                saw_content = True
+            yield None, chunk
+
+        if not saw_content:
+            raise OpenRouterError(
+                f"synthesis stream from {model} produced no content",
+                retryable=True,
+            )
+
+    async def _run_candidates(
+        self,
+        request: ChatCompletionRequest,
+        policy: FanoutPolicy,
+    ) -> list[CompletionResult]:
+        distributed = distribute_models(
+            list(policy.candidate_models), policy.fanout_count
+        )
+        tasks = [
+            self._run_with_default_model_retry(
+                request.messages,
+                model,
+                policy.default_fallback_model,
+                request.candidate_request_body(),
+            )
+            for model in distributed
+        ]
+        results = await asyncio.gather(*tasks)
+
+        candidates: list[CompletionResult] = []
+        failures: list[str] = []
+        failure_exceptions: list[OpenRouterError | None] = []
+        for index, (result, failure, final_model) in enumerate(results, start=1):
+            if failure is not None:
+                logger.warning(
+                    "candidate_failed",
+                    extra={"candidate_index": index, "error": failure.message},
+                )
+                failures.append(f"candidate {index} ({final_model}): {failure.message}")
+                failure_exceptions.append(failure.last_exception)
+                continue
+
+            logger.info(
+                "candidate_completed",
+                extra={"candidate_index": index, "model": final_model},
+            )
+            candidates.append(result)
+
+        if not candidates:
+            shared = _shared_upstream_client_error(failure_exceptions)
+            if shared is not None:
+                raise shared
+            raise AllCandidatesFailedError(
+                "all candidates failed: " + "; ".join(failures)
+            )
+        return candidates
 
     async def _run_with_default_model_retry(
         self,
@@ -341,3 +544,123 @@ def _message_content_to_text(message: ChatMessage) -> str:
             if stripped:
                 parts.append(stripped)
     return "\n".join(parts)
+
+
+def _chunk_has_content(chunk: dict[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    first = choices[0]
+    if not isinstance(first, dict):
+        return False
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    content = delta.get("content")
+    return isinstance(content, str) and len(content) > 0
+
+
+def _preamble_from_chunk(
+    chunk: dict[str, Any],
+    *,
+    default_model: str,
+    synthesized: bool,
+) -> StreamPreamble:
+    model = chunk.get("model") if isinstance(chunk.get("model"), str) else None
+    provider = chunk.get("provider") if isinstance(chunk.get("provider"), str) else None
+    system_fingerprint = (
+        chunk.get("system_fingerprint")
+        if isinstance(chunk.get("system_fingerprint"), str)
+        else None
+    )
+    return StreamPreamble(
+        model=model or default_model,
+        provider=provider,
+        system_fingerprint=system_fingerprint,
+        synthesized=synthesized,
+    )
+
+
+def _buffered_deltas(candidate: CompletionResult) -> list[dict[str, Any]]:
+    """
+    Build a synthetic delta stream for a fully-buffered candidate
+    response. Used as a fallback when we can't stream the synthesis
+    call for real (e.g. single-candidate policy, synthesis failure).
+    This mirrors OpenRouter's chunk shape so the caller can treat it
+    uniformly with a real stream.
+    """
+    message = (
+        candidate.choice.get("message") if isinstance(candidate.choice, dict) else None
+    )
+    if not isinstance(message, dict):
+        message = {}
+
+    role_raw = message.get("role")
+    role = role_raw if isinstance(role_raw, str) and role_raw else "assistant"
+
+    finish_raw = (
+        candidate.choice.get("finish_reason")
+        if isinstance(candidate.choice, dict)
+        else None
+    )
+    finish_reason = finish_raw if isinstance(finish_raw, str) and finish_raw else "stop"
+
+    native_finish_raw = (
+        candidate.choice.get("native_finish_reason")
+        if isinstance(candidate.choice, dict)
+        else None
+    )
+    native_finish_reason = (
+        native_finish_raw if isinstance(native_finish_raw, str) else None
+    )
+
+    chunks: list[dict[str, Any]] = []
+
+    # Initial role-only delta
+    chunks.append(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": role, "content": ""},
+                    "finish_reason": None,
+                    "native_finish_reason": None,
+                }
+            ]
+        }
+    )
+
+    # Content, sliced into smallish pieces. This is a fallback path only.
+    content = candidate.content or ""
+    piece_size = 64
+    for start in range(0, len(content), piece_size):
+        piece = content[start : start + piece_size]
+        chunks.append(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": role, "content": piece},
+                        "finish_reason": None,
+                        "native_finish_reason": None,
+                    }
+                ]
+            }
+        )
+
+    # Terminal delta with finish_reason and (optionally) usage.
+    terminal: dict[str, Any] = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": role, "content": ""},
+                "finish_reason": finish_reason,
+                "native_finish_reason": native_finish_reason,
+            }
+        ]
+    }
+    if candidate.usage:
+        terminal["usage"] = candidate.usage
+    chunks.append(terminal)
+
+    return chunks
