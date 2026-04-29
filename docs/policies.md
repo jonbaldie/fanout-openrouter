@@ -4,9 +4,9 @@ The `fan-out-openrouter` proxy routes incoming requests based on policies define
 
 This file defines "virtual models" that clients can request. When a client requests a virtual model, the proxy looks up its policy to determine how to fan out the request to actual upstream models.
 
-## Structure of `fanout_policies.json`
+## Common Use-Case Configurations
 
-The file must contain a single JSON object with a `policies` array. Each object in that array defines one virtual model.
+Based on the top ranked models on OpenRouter, here are some highly recommended policy presets spanning different tiers:
 
 ```json
 {
@@ -14,27 +14,64 @@ The file must contain a single JSON object with a `policies` array. Each object 
     {
       "virtual_model": "fanout/minimal",
       "candidate_models": [
-        "anthropic/claude-3.5-haiku",
-        "openai/gpt-4o-mini"
+        "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.4-nano"
       ],
       "fanout_count": 2,
-      "synthesis_model": "anthropic/claude-3.5-haiku",
-      "default_fallback_model": "anthropic/claude-3.5-haiku",
+      "synthesis_model": "anthropic/claude-haiku-4.5",
       "created": 1710000000
     },
     {
-      "virtual_model": "fanout/high-quality",
+      "virtual_model": "fanout/max-intelligence",
       "candidate_models": [
-        "anthropic/claude-3.5-sonnet",
-        "openai/gpt-4o",
-        "google/gemini-1.5-pro"
+        "anthropic/claude-4.7-opus-20260416",
+        "anthropic/claude-4.6-sonnet-20260217",
+        "deepseek/deepseek-v3.2-20251201"
+      ],
+      "fanout_count": 3,
+      "synthesis_model": "anthropic/claude-4.7-opus-20260416",
+      "default_fallback_model": "anthropic/claude-4.6-sonnet-20260217",
+      "created": 1710000001
+    },
+    {
+      "virtual_model": "fanout/fast-consensus",
+      "candidate_models": [
+        "google/gemini-3-flash-preview-20251217",
+        "x-ai/grok-4.1-fast",
+        "stepfun/step-3.5-flash"
       ],
       "fanout_count": 5,
-      "created": 1710000001
+      "synthesis_model": "google/gemini-3-flash-preview-20251217",
+      "created": 1710000002
+    },
+    {
+      "virtual_model": "fanout/free-tier",
+      "candidate_models": [
+        "tencent/hy3-preview-20260421:free",
+        "nvidia/nemotron-3-super-120b-a12b-20230311:free"
+      ],
+      "fanout_count": 4,
+      "synthesis_model": "tencent/hy3-preview-20260421:free",
+      "created": 1710000003
     }
   ]
 }
 ```
+
+### 1. `fanout/max-intelligence` (Tier 1)
+- **Goal:** Best possible reasoning and coding answers for complex problems, regardless of cost.
+- **Strategy:** Ask the 3 smartest models on the planet (Claude 4.7 Opus, Claude 4.6 Sonnet, and Deepseek v3.2) to draft solutions, and have Opus evaluate them and synthesize the absolute best response.
+- **Use Cases:** Software architecture, advanced mathematics, refactoring massive codebases.
+
+### 2. `fanout/fast-consensus` (Tier 2)
+- **Goal:** Fast, cheap, and capable consensus logic.
+- **Strategy:** Fanning out 5 times across ultra-fast models like Gemini 3 Flash, Grok 4.1 Fast, and Step 3.5 Flash. It round-robins them, gathering 5 responses in a matter of seconds, before asking Gemini 3 Flash to synthesize the consensus.
+- **Use Cases:** Document summarization, routing classifiers, extracting data from large messy logs.
+
+### 3. `fanout/free-tier` (Tier 3)
+- **Goal:** Zero-cost inference.
+- **Strategy:** Leverages models that are currently offered for free on OpenRouter, giving you a powerful multi-agent ensemble setup at $0.00 cost.
+- **Use Cases:** Academic experimentation, personal hobby projects, high-volume repetitive tasks.
 
 ## Schema Reference
 

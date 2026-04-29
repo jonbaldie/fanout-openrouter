@@ -7,7 +7,41 @@
         "openai/gpt-5.4-nano"
       ],
       "fanout_count": 2,
+      "synthesis_model": "anthropic/claude-haiku-4.5",
       "created": 1710000000
+    },
+    {
+      "virtual_model": "fanout/max-intelligence",
+      "candidate_models": [
+        "anthropic/claude-4.7-opus-20260416",
+        "anthropic/claude-4.6-sonnet-20260217",
+        "deepseek/deepseek-v3.2-20251201"
+      ],
+      "fanout_count": 3,
+      "synthesis_model": "anthropic/claude-4.7-opus-20260416",
+      "default_fallback_model": "anthropic/claude-4.6-sonnet-20260217",
+      "created": 1710000001
+    },
+    {
+      "virtual_model": "fanout/fast-consensus",
+      "candidate_models": [
+        "google/gemini-3-flash-preview-20251217",
+        "x-ai/grok-4.1-fast",
+        "stepfun/step-3.5-flash"
+      ],
+      "fanout_count": 5,
+      "synthesis_model": "google/gemini-3-flash-preview-20251217",
+      "created": 1710000002
+    },
+    {
+      "virtual_model": "fanout/free-tier",
+      "candidate_models": [
+        "tencent/hy3-preview-20260421:free",
+        "nvidia/nemotron-3-super-120b-a12b-20230311:free"
+      ],
+      "fanout_count": 4,
+      "synthesis_model": "tencent/hy3-preview-20260421:free",
+      "created": 1710000003
     }
   ]
 }
