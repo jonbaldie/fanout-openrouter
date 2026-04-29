@@ -1,13 +1,37 @@
 # fan-out-openrouter
 
-Tracer bullet for an OpenRouter-compatible chat completion API that fans out to OpenRouter, synthesizes candidate answers, and returns a standard chat completion response.
+An OpenRouter-compatible chat completion proxy that fans out requests to multiple models via OpenRouter, synthesizes their candidate answers, and returns a standard chat completion response. This enables higher quality, consensus-driven outputs while maintaining strict adherence to the OpenAI wire protocol, including streaming and tool calling.
 
-## Run
+## Features
+
+- **Drop-in replacement:** Implements the OpenAI/OpenRouter chat completion API contract perfectly. Works seamlessly with existing clients (e.g. standard OpenAI python/node clients).
+- **Fan-out architecture:** Runs multiple inference paths concurrently to generate diverse candidate answers.
+- **Synthesis engine:** Analyzes the candidates and generates a single, superior synthesized response.
+- **Robust tool calling:** Candidate models suggest tool usage, which the synthesis model evaluates and accurately invokes.
+- **Resilient routing:** Gracefully falls back to configured default models if candidate generation or synthesis encounters upstream errors.
+- **Full streaming support:** Perfectly preserves OpenAI-style SSE streaming behavior, including mid-stream error propagation.
+
+## Setup and Installation
+
+Requirements:
+- Python >= 3.12
+- [uv](https://docs.astral.sh/uv/) (Fast Python package and project manager)
+
+```bash
+# Clone the repository
+git clone https://github.com/yourusername/fan-out-openrouter.git
+cd fan-out-openrouter
+
+# Install dependencies using uv
+uv sync --all-extras
+```
+
+## Running the Server
 
 Set an upstream OpenRouter key and start the server:
 
 ```bash
-OPENROUTER_API_KEY=... uv run uvicorn fanout_openrouter.app:app --reload
+OPENROUTER_API_KEY=your_key_here uv run uvicorn fanout_openrouter.app:app --reload
 ```
 
 The server exposes:
@@ -29,7 +53,7 @@ The server automatically loads environment variables from a `.env` file in the r
 
 ## Model Policies
 
-The tracer bullet loads virtual models from a JSON policy file (default: `fanout_policies.json`). This defines how requests to a specific virtual model are routed, fanned out, and synthesized.
+The proxy loads virtual models from a JSON policy file (default: `fanout_policies.json`). This defines how requests to a specific virtual model are routed, fanned out, and synthesized.
 
 Example `fanout_policies.json`:
 
@@ -65,10 +89,28 @@ When a request includes `tools`, the fan-out and synthesis process still applies
 2. **Serialization:** If a candidate decides to invoke a tool, its tool call is serialized into a text block (e.g., `[Tool Call: get_weather({"city": "Paris"})]`) so the synthesizer can evaluate the intent.
 3. **Synthesis & Execution:** The synthesis model receives the candidate responses (including the serialized tool calls) along with the original tool schemas. It is instructed to evaluate the candidates' intents and, if appropriate, execute the final tool call natively. This ensures strict schema adherence for the downstream client.
 
-## Test
+## Development and Testing
+
+The project uses `pytest` for testing, `ruff` for linting/formatting, and relies heavily on live smoke testing against OpenRouter to ensure absolute contract parity.
 
 ```bash
+# Run formatting and linting
+uv run ruff format .
+uv run ruff check .
+
+# Run the test suite
+# Note: The default test suite includes live smoke coverage against OpenRouter.
+# OPENROUTER_API_KEY must be available via the environment or .env
 uv run pytest
 ```
 
-The default test suite includes live smoke coverage against OpenRouter, so `OPENROUTER_API_KEY` must be available via the environment or `.env`.
+## Contributing
+
+Contributions are welcome! Please ensure that:
+1. You run `uv run ruff check .` and `uv run ruff format .` before submitting.
+2. The entire test suite (`uv run pytest`) passes. If you are changing the API surface, pay special attention to the parity tests (`test_parity.py`).
+3. You follow the existing code structure and formatting conventions.
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
