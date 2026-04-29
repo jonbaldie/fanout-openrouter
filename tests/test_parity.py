@@ -80,6 +80,10 @@ def _normalize(value: Any) -> Any:
                 out[key] = "<normalized>"
             elif key == "usage" and isinstance(inner, dict):
                 out[key] = {uk: "<normalized>" for uk in inner.keys()}
+            elif key == "arguments" and isinstance(inner, str):
+                # tool_calls[].function.arguments is model-authored JSON text;
+                # the exact whitespace/formatting is non-deterministic.
+                out[key] = "<normalized>"
             else:
                 out[key] = _normalize(inner)
         return out
@@ -1003,5 +1007,119 @@ def test_parity_chat_stream_is_progressive(
     _log("step 2/2: measuring local facade stream")
     local_timing = _capture_stream_timing_local_http(local_http_server, local_body)
     _assert_progressive("local", local_timing)
+
+    _log("PASS")
+
+
+# ---------- tool_calls parity ----------
+
+# OpenRouter surfaces tool calls on chat completions by returning a choice with
+# `finish_reason == "tool_calls"` and a `message.tool_calls` list. Agents like
+# opencode will not function against a provider that strips or synthesizes
+# these away. This case proves our facade carries the tool-calls wire shape
+# through unchanged for the initial (no prior tool result) request.
+
+
+TOOL_CALLS_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the current weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+
+
+def test_parity_chat_tool_calls_non_stream(
+    api_key: str, local_client: TestClient
+) -> None:
+    """
+    Tool-calling contract: when the upstream model decides to invoke a
+    function tool, our facade must pass that decision through with
+    `finish_reason == "tool_calls"` and `message.tool_calls` intact.
+    """
+    _log("case: chat_tool_calls_non_stream")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You must call the get_weather tool when the user asks "
+                    "about weather."
+                ),
+            },
+            {"role": "user", "content": "What is the weather in Paris right now?"},
+        ],
+        "tools": TOOL_CALLS_TOOLS,
+        "tool_choice": "auto",
+        "max_tokens": 200,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter with tools")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade with tools")
+    local = _capture_local_json(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_tool_calls_non_stream:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_tool_calls_stream(api_key: str, local_client: TestClient) -> None:
+    """
+    Streaming tool-calling contract: upstream tool-call deltas must emit
+    as progressive SSE chunks without being dropped or mangled by the
+    synthesis path.
+    """
+    _log("case: chat_tool_calls_stream")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [
+            {
+                "role": "system",
+                "content": (
+                    "You must call the get_weather tool when the user asks "
+                    "about weather."
+                ),
+            },
+            {"role": "user", "content": "What is the weather in Paris right now?"},
+        ],
+        "tools": TOOL_CALLS_TOOLS,
+        "tool_choice": "auto",
+        "max_tokens": 200,
+        "stream": True,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter stream with tools")
+    oracle = _capture_oracle_stream(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade stream with tools")
+    local = _capture_local_stream(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing stream snapshots")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_tool_calls_stream:\n  - {rendered}")
 
     _log("PASS")

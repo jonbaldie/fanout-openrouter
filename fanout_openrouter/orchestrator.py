@@ -97,6 +97,33 @@ class SynthesizerService:
         request: ChatCompletionRequest,
         policy: FanoutPolicy,
     ) -> OrchestratedResponse:
+        # Tool-calling requests cannot be synthesized because synthesis would
+        # need to emit a precise JSON payload on behalf of candidates, which
+        # breaks the deterministic contract of tools. Bypass fan-out entirely.
+        if request.candidate_request_body().get("tools"):
+            logger.info("tools_present_bypassing_fanout")
+            result, failure, final_model = await self._run_with_default_model_retry(
+                request.messages,
+                policy.candidate_models[0]
+                if policy.candidate_models
+                else policy.default_fallback_model,
+                policy.default_fallback_model,
+                request.candidate_request_body(),
+            )
+            if failure is not None:
+                raise failure.last_exception or OpenRouterError(failure.message)
+            if result is None:
+                raise OpenRouterError("candidate returned no result")
+            return OrchestratedResponse(
+                content=result.content,
+                model=result.model,
+                provider=result.provider,
+                system_fingerprint=result.system_fingerprint,
+                choice=result.choice,
+                usage=result.usage,
+                synthesized=False,
+            )
+
         distributed = distribute_models(
             list(policy.candidate_models), policy.fanout_count
         )
@@ -136,6 +163,22 @@ class SynthesizerService:
                 raise shared
             raise AllCandidatesFailedError(
                 "all candidates failed: " + "; ".join(failures)
+            )
+
+        # Tool-call responses cannot be meaningfully synthesized: the caller
+        # needs the exact tool invocations the upstream model produced. If
+        # any candidate returned with tool_calls, pass that one through
+        # unchanged rather than running it through a synthesis step.
+        tool_call_candidate = next((c for c in candidates if c.tool_calls), None)
+        if tool_call_candidate is not None:
+            return OrchestratedResponse(
+                content=tool_call_candidate.content,
+                model=tool_call_candidate.model,
+                provider=tool_call_candidate.provider,
+                system_fingerprint=tool_call_candidate.system_fingerprint,
+                choice=tool_call_candidate.choice,
+                usage=tool_call_candidate.usage,
+                synthesized=False,
             )
 
         if len(candidates) == 1:
@@ -211,7 +254,41 @@ class SynthesizerService:
         built from the first candidate so the wire contract stays
         consistent from the client's perspective.
         """
+        if request.candidate_request_body().get("tools"):
+            model = (
+                policy.candidate_models[0]
+                if policy.candidate_models
+                else policy.default_fallback_model
+            )
+            logger.info("tools_present_bypassing_fanout_stream", extra={"model": model})
+            async for item in self._stream_one_synthesis_attempt(
+                request.messages,
+                model,
+                request.candidate_request_body(),
+                synthesized=False,
+            ):
+                yield item
+            return
+
         candidates = await self._run_candidates(request, policy)
+
+        tool_call_candidate = next((c for c in candidates if c.tool_calls), None)
+        if tool_call_candidate is not None:
+            preamble = StreamPreamble(
+                model=tool_call_candidate.model,
+                provider=tool_call_candidate.provider,
+                system_fingerprint=tool_call_candidate.system_fingerprint,
+                synthesized=False,
+            )
+            buffered = _buffered_deltas(tool_call_candidate)
+            if buffered:
+                yield preamble, buffered[0]
+                for delta in buffered[1:]:
+                    await asyncio.sleep(0.02)
+                    yield None, delta
+            else:
+                yield preamble, None
+            return
 
         if len(candidates) == 1:
             candidate = candidates[0]
@@ -221,9 +298,14 @@ class SynthesizerService:
                 system_fingerprint=candidate.system_fingerprint,
                 synthesized=False,
             )
-            yield preamble, None
-            for delta in _buffered_deltas(candidate):
-                yield None, delta
+            buffered = _buffered_deltas(candidate)
+            if buffered:
+                yield preamble, buffered[0]
+                for delta in buffered[1:]:
+                    await asyncio.sleep(0.02)
+                    yield None, delta
+            else:
+                yield preamble, None
             return
 
         synthesis_prompt = build_synthesis_prompt(
@@ -246,6 +328,7 @@ class SynthesizerService:
                 synthesis_messages,
                 primary_model,
                 extra_body,
+                synthesized=True,
             ):
                 stream_started = True
                 yield item
@@ -264,6 +347,7 @@ class SynthesizerService:
                     synthesis_messages,
                     fallback_model,
                     extra_body,
+                    synthesized=True,
                 ):
                     stream_started = True
                     yield item
@@ -287,15 +371,22 @@ class SynthesizerService:
             system_fingerprint=candidate.system_fingerprint,
             synthesized=False,
         )
-        yield preamble, None
-        for delta in _buffered_deltas(candidate):
-            yield None, delta
+        buffered = _buffered_deltas(candidate)
+        if buffered:
+            yield preamble, buffered[0]
+            for delta in buffered[1:]:
+                await asyncio.sleep(0.02)
+                yield None, delta
+        else:
+            yield preamble, None
 
     async def _stream_one_synthesis_attempt(
         self,
         synthesis_messages: list[ChatMessage],
         model: str,
         extra_body: dict[str, object] | None,
+        *,
+        synthesized: bool,
     ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | None]]:
         preamble_sent = False
         saw_content = False
@@ -308,13 +399,15 @@ class SynthesizerService:
                 preamble = _preamble_from_chunk(
                     chunk,
                     default_model=model,
-                    synthesized=True,
+                    synthesized=synthesized,
                 )
-                yield preamble, None
+                yield preamble, chunk
                 preamble_sent = True
-            if _chunk_has_content(chunk):
+            else:
+                yield None, chunk
+
+            if _chunk_has_content(chunk) or _chunk_has_tool_calls(chunk):
                 saw_content = True
-            yield None, chunk
 
         if not saw_content:
             raise OpenRouterError(
@@ -377,8 +470,11 @@ class SynthesizerService:
         extra_body: dict[str, object] | None,
     ) -> tuple[CompletionResult | None, CandidateFailure | None, str]:
         result, failure = await self._run_with_retry(messages, model, extra_body)
+        content_missing = (
+            result is not None and not result.content.strip() and not result.tool_calls
+        )
         if (
-            failure is not None or result is None or not result.content.strip()
+            failure is not None or result is None or content_missing
         ) and model != default_model:
             logger.warning(
                 "primary_model_failed_retrying_default",
@@ -434,7 +530,7 @@ class SynthesizerService:
                     last_exception=last_exception,
                 )
 
-            if not result.content.strip():
+            if not result.content.strip() and not result.tool_calls:
                 last_error = "empty response"
                 last_exception = None
                 if attempt < self._max_attempts:
@@ -560,6 +656,20 @@ def _chunk_has_content(chunk: dict[str, Any]) -> bool:
     return isinstance(content, str) and len(content) > 0
 
 
+def _chunk_has_tool_calls(chunk: dict[str, Any]) -> bool:
+    choices = chunk.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    first = choices[0]
+    if not isinstance(first, dict):
+        return False
+    delta = first.get("delta")
+    if not isinstance(delta, dict):
+        return False
+    tool_calls = delta.get("tool_calls")
+    return isinstance(tool_calls, list) and len(tool_calls) > 0
+
+
 def _preamble_from_chunk(
     chunk: dict[str, Any],
     *,
@@ -632,15 +742,35 @@ def _buffered_deltas(candidate: CompletionResult) -> list[dict[str, Any]]:
 
     # Content, sliced into smallish pieces. This is a fallback path only.
     content = candidate.content or ""
-    piece_size = 64
-    for start in range(0, len(content), piece_size):
-        piece = content[start : start + piece_size]
+    if content:
+        piece_size = 64
+        for start in range(0, len(content), piece_size):
+            piece = content[start : start + piece_size]
+            chunks.append(
+                {
+                    "choices": [
+                        {
+                            "index": 0,
+                            "delta": {"role": role, "content": piece},
+                            "finish_reason": None,
+                            "native_finish_reason": None,
+                        }
+                    ]
+                }
+            )
+
+    # If the candidate produced tool calls, emit them in a dedicated delta.
+    if candidate.tool_calls:
         chunks.append(
             {
                 "choices": [
                     {
                         "index": 0,
-                        "delta": {"role": role, "content": piece},
+                        "delta": {
+                            "role": role,
+                            "content": None,
+                            "tool_calls": candidate.tool_calls,
+                        },
                         "finish_reason": None,
                         "native_finish_reason": None,
                     }

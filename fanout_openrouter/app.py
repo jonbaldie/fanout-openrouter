@@ -214,25 +214,27 @@ async def _handle_streaming(
 
     async def body() -> AsyncIterator[str]:
         try:
-            # Emit the initial role-only frame derived from the preamble
-            # and, if present, the first upstream chunk. OpenRouter always
-            # opens a stream with a role delta; doing the same keeps
-            # clients that expect that pattern happy.
-            initial_role = _role_from_chunk(first_chunk) or "assistant"
-            yield _sse_data(
-                _stream_chunk_payload(
-                    response_id=response_id,
-                    created=created,
-                    model=preamble.model,
-                    provider=preamble.provider,
-                    system_fingerprint=preamble.system_fingerprint,
-                    delta={"role": initial_role, "content": ""},
-                    finish_reason=None,
-                    native_finish_reason=None,
+            if first_chunk is None:
+                # Upstream yielded no content before closing; emit a synthetic
+                # empty reply so the client sees a valid role/content payload.
+                yield _sse_data(
+                    _stream_chunk_payload(
+                        response_id=response_id,
+                        created=created,
+                        model=preamble.model,
+                        provider=preamble.provider,
+                        system_fingerprint=preamble.system_fingerprint,
+                        delta={"role": "assistant", "content": ""},
+                        finish_reason="stop",
+                        native_finish_reason=None,
+                    )
                 )
-            )
-
-            if first_chunk is not None:
+            else:
+                # If there's a first chunk, just stream it (and all subsequent
+                # chunks) exactly as they arrived from upstream, merely
+                # restamping the top-level envelope fields. We do not inject
+                # synthetic chunks because that shifts SSE boundaries and breaks
+                # strict wire parity, especially for tool_calls.
                 yield _sse_data(
                     _restamp_upstream_chunk(
                         first_chunk,

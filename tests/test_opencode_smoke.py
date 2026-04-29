@@ -16,10 +16,9 @@ The harness:
    OPENCODE_CONFIG_DIR / HOME so the user's real opencode state is not
    consulted.
 
-Per the current task: this is NOT yet expected to pass. The goal is to stand
-up the harness end-to-end so we can iterate on compatibility gaps with real
-signal. Failures here document the next slice of work against OpenRouter
-parity, not a regression in our facade.
+This harness is now a real green-path smoke test. It still uses loose enough
+assertions to tolerate normal non-determinism, but it no longer treats a clean
+run as merely exploratory wiring.
 
 Run just this file with:
 
@@ -37,7 +36,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import httpx
 import pytest
@@ -252,6 +251,27 @@ class OpenCodeResult:
     stderr: str
 
 
+def _parse_jsonl(stdout: str) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for raw in stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        parsed = json.loads(line)
+        if isinstance(parsed, dict):
+            events.append(parsed)
+    return events
+
+
+def _assistant_text_from_events(events: list[dict[str, Any]]) -> str:
+    text_parts = [
+        event.get("part", {}).get("text", "")
+        for event in events
+        if event.get("type") == "text"
+    ]
+    return "".join(part for part in text_parts if isinstance(part, str)).strip()
+
+
 def _run_opencode(
     args: list[str],
     *,
@@ -332,11 +352,7 @@ def test_opencode_run_round_trip(
 ) -> None:
     """
     End-to-end tracer bullet: `opencode run` against our facade should
-    return a non-error response containing the assistant's reply.
-
-    This test is intentionally loose. It captures the raw JSON event stream
-    from opencode so that, when it fails, we can diff opencode's
-    expectations against what our facade actually emits.
+    return a valid JSON event stream containing the assistant's reply.
     """
     _log("case: opencode_run_round_trip")
 
@@ -359,8 +375,14 @@ def test_opencode_run_round_trip(
         f"opencode run exited rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
-    # We deliberately do not assert on the exact shape of opencode's output
-    # yet. The first job of this harness is to stand up the wiring. When
-    # this passes we can tighten the assertion to inspect the assistant
-    # turn produced by opencode.
-    assert result.stdout.strip(), "opencode run produced no stdout"
+    events = _parse_jsonl(result.stdout)
+    assert events, "opencode run produced no JSON events"
+    assert events[0].get("type") == "step_start"
+    assert events[-1].get("type") == "step_finish"
+    assert events[-1].get("part", {}).get("reason") == "stop"
+
+    assistant_text = _assistant_text_from_events(events)
+    assert assistant_text.lower().rstrip(".!?") == "ok", (
+        f"expected assistant text to be 'ok', got {assistant_text!r}\n"
+        f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    )

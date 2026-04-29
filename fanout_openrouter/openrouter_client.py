@@ -34,6 +34,8 @@ class CompletionResult:
     system_fingerprint: str | None
     choice: dict[str, Any]
     usage: dict[str, Any] | None
+    finish_reason: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
 
 class OpenRouterClient:
@@ -93,11 +95,21 @@ class OpenRouterClient:
             raise OpenRouterError("OpenRouter returned no choices")
 
         message = choices[0].get("message") or {}
-        content = self._extract_content(message)
+        tool_calls_raw = message.get("tool_calls")
+        tool_calls = (
+            tool_calls_raw
+            if isinstance(tool_calls_raw, list) and tool_calls_raw
+            else None
+        )
+        content = self._extract_content(message, allow_empty=tool_calls is not None)
         model_name = data.get("model") or model
         provider = data.get("provider")
         system_fingerprint = data.get("system_fingerprint")
         usage = data.get("usage")
+        finish_reason_raw = choices[0].get("finish_reason")
+        finish_reason = (
+            finish_reason_raw if isinstance(finish_reason_raw, str) else None
+        )
         return CompletionResult(
             content=content,
             model=model_name,
@@ -107,6 +119,8 @@ class OpenRouterClient:
             ),
             choice=choices[0],
             usage=usage if isinstance(usage, dict) else None,
+            finish_reason=finish_reason,
+            tool_calls=tool_calls,
         )
 
     async def stream_chat_completion(
@@ -193,7 +207,22 @@ class OpenRouterClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    def _extract_content(self, message: dict[str, Any]) -> str:
+    def _extract_content(
+        self,
+        message: dict[str, Any],
+        *,
+        allow_empty: bool = False,
+    ) -> str:
+        """
+        Extract assistant text from a completion message.
+
+        `allow_empty=True` lets callers opt into tolerating a null/missing
+        content payload, which is how OpenRouter signals a tool-call-only
+        response (`message.content == null` with `tool_calls` populated).
+        Retryable "empty response" behavior stays the default for the
+        non-tool-call path so we still fail fast on genuinely empty
+        answers.
+        """
         content = message.get("content")
         if isinstance(content, str):
             return content
@@ -207,6 +236,9 @@ class OpenRouterClient:
                     text_parts.append(part["text"])
             if text_parts:
                 return "".join(text_parts)
+
+        if allow_empty and (content is None or content == ""):
+            return ""
 
         raise OpenRouterError("OpenRouter returned a non-text message content payload")
 

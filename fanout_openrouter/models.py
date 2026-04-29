@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, model_serializer
 
 
 class ChatMessage(BaseModel):
@@ -41,18 +41,31 @@ class ChatCompletionRequest(BaseModel):
 
 class ResponseMessage(BaseModel):
     role: Literal["assistant"] = "assistant"
-    content: str
+    # Content may be absent when the model returns tool_calls instead; keep
+    # the wire shape honest rather than coercing null -> "".
+    content: str | None = None
     refusal: str | None = None
     reasoning: str | None = None
     reasoning_details: list[dict[str, Any]] | None = None
+    tool_calls: list[dict[str, Any]] | None = None
 
     model_config = ConfigDict(extra="allow")
+
+    @model_serializer(mode="wrap")
+    def serialize_model(self, handler) -> dict[str, Any]:
+        result = handler(self)
+        if result.get("tool_calls") is None:
+            result.pop("tool_calls", None)
+        return result
 
 
 class Choice(BaseModel):
     index: int = 0
     message: ResponseMessage
-    finish_reason: Literal["stop"] = "stop"
+    # OpenRouter emits a range of finish reasons ("stop", "length",
+    # "tool_calls", "content_filter", etc.). Stay permissive so every
+    # upstream value flows through unchanged.
+    finish_reason: str = "stop"
     logprobs: dict[str, Any] | None = None
     native_finish_reason: str | None = None
 
