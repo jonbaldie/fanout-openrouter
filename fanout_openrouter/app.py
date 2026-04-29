@@ -224,11 +224,17 @@ def _resolve_policy(
 
     Priority order:
       1. Inline ``models`` list  -> ad-hoc fan-out policy built from that list.
-      2. Named virtual model     -> registered policy from the policy file.
-      3. Anything else           -> None (caller should pass through to OpenRouter).
+      2. Comma-separated ``model`` string -> ad-hoc fan-out policy.
+      3. Named virtual model     -> registered policy from the policy file.
+      4. Anything else           -> None (caller should pass through to OpenRouter).
     """
+    candidates: tuple[str, ...] | None = None
     if request.models:
         candidates = tuple(request.models)
+    elif "," in request.model:
+        candidates = tuple(m.strip() for m in request.model.split(",") if m.strip())
+
+    if candidates:
         return FanoutPolicy(
             virtual_model=request.model,
             candidate_models=candidates,

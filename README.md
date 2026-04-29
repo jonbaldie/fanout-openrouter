@@ -131,6 +131,27 @@ Once this is in your config and your facade is running locally in another termin
 OPENROUTER_API_KEY="sk-or-..." opencode run --model fanoutlocal/fanout/minimal "Read my README.md file and summarize it."
 ```
 
+#### Ad-hoc Model Routing with Opencode
+Our facade supports ad-hoc fan-out by passing multiple models as a comma-separated string (e.g., `anthropic/claude-3.5-haiku,openai/gpt-4o-mini`). However, Opencode strictly validates model names locally before ever sending the request. 
+
+To use ad-hoc routing via Opencode, you must explicitly register your exact comma-separated string as a model in your `opencode.json` configuration:
+
+```json
+      "models": {
+        "fanout/minimal": {
+          "name": "Fanout Minimal (Local)"
+        },
+        "anthropic/claude-3.5-haiku,openai/gpt-4o-mini": {
+          "name": "Ad-hoc Claude+GPT"
+        }
+      }
+```
+
+Then you can invoke it just like any other model:
+```bash
+OPENROUTER_API_KEY="sk-or-..." opencode run --model "fanoutlocal/anthropic/claude-3.5-haiku,openai/gpt-4o-mini" "Your prompt"
+```
+
 ## Development and Testing
 
 The project uses `pytest` for testing, `ruff` for linting/formatting, and relies heavily on live smoke testing against OpenRouter to ensure absolute contract parity.
