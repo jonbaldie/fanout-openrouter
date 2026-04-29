@@ -287,7 +287,8 @@ def _run_opencode(
         cmd,
         env=env,
         cwd=str(cwd),
-        capture_output=True, stdin=subprocess.DEVNULL,
+        capture_output=True,
+        stdin=subprocess.DEVNULL,
         timeout=timeout,
     )
     stdout = completed.stdout.decode("utf-8", errors="replace")
@@ -389,20 +390,21 @@ def test_opencode_run_round_trip(
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
 
+
 def test_opencode_run_read_only_tool_calls(
     opencode_env: OpenCodeEnv,
     workspace: Path,
 ) -> None:
     """
-    Test that opencode can use read-only tools (like reading files) 
+    Test that opencode can use read-only tools (like reading files)
     through our local facade without timing out or failing.
     """
     _log("case: opencode_run_read_only_tool_calls")
-    
+
     # Setup test file
     test_file = workspace / "data.txt"
     test_file.write_text("THE_SECRET_TOKEN_IS_12345", encoding="utf-8")
-    
+
     result = _run_opencode(
         [
             "run",
@@ -417,14 +419,14 @@ def test_opencode_run_read_only_tool_calls(
         cwd=workspace,
         timeout=180.0,
     )
-    
+
     assert result.returncode == 0, (
         f"opencode run exited rc={result.returncode}\n"
         f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     )
     events = _parse_jsonl(result.stdout)
     assert events, "opencode run produced no JSON events"
-    
+
     assistant_text = _assistant_text_from_events(events)
     assert "THE_SECRET_TOKEN_IS_12345" in assistant_text, (
         f"expected assistant to find the secret in data.txt, got {assistant_text!r}\n"
