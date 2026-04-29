@@ -53,6 +53,16 @@
       "created": 1710000004
     },
     {
+      "virtual_model": "fanout/fleet-of-nanos",
+      "candidate_models": [
+        "openai/gpt-5.4-nano"
+      ],
+      "fanout_count": 4,
+      "synthesis_model": "openai/gpt-5.4-nano",
+      "default_fallback_model": "openai/gpt-5.4-nano",
+      "created": 1710000006
+    },
+    {
       "virtual_model": "fanout/frontier",
       "candidate_models": [
         "anthropic/claude-opus-4.7",
