@@ -29,6 +29,9 @@ from .orchestrator import (
 )
 from .policy import PolicyRegistry
 from .settings import Settings
+from .logging import configure_logging
+
+configure_logging(structured=False)  # Can be made configurable via env later
 
 
 class FanoutAPIError(RuntimeError):
