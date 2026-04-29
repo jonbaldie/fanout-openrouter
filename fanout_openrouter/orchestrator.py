@@ -29,7 +29,7 @@ class CompletionClient(Protocol):
         model: str,
         messages: list[ChatMessage],
         extra_body: dict[str, object] | None,
-    ) -> AsyncIterator[dict[str, Any]]: ...
+    ) -> AsyncIterator[dict[str, Any] | str]: ...
 
 
 class AllCandidatesFailedError(RuntimeError):
@@ -189,7 +189,7 @@ class SynthesizerService:
         self,
         request: ChatCompletionRequest,
         policy: FanoutPolicy,
-    ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | None]]:
+    ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | str | None]]:
         """
         Run candidates to completion, then stream the synthesis call's
         deltas as they arrive upstream. The iterator yields a sequence of
@@ -211,7 +211,14 @@ class SynthesizerService:
         built from the first candidate so the wire contract stays
         consistent from the client's perspective.
         """
-        candidates = await self._run_candidates(request, policy)
+        candidates_task = asyncio.create_task(self._run_candidates(request, policy))
+        while not candidates_task.done():
+            # Wait for up to 1 second; if not done, emit a keep-alive
+            done, pending = await asyncio.wait([candidates_task], timeout=1.0)
+            if not done:
+                yield None, ": OPENROUTER PROCESSING"
+
+        candidates = candidates_task.result()
 
         if len(candidates) == 1:
             candidate = candidates[0]
@@ -310,7 +317,7 @@ class SynthesizerService:
         extra_body: dict[str, object] | None,
         *,
         synthesized: bool,
-    ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | None]]:
+    ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | str | None]]:
         preamble_sent = False
         saw_content = False
         async for chunk in self._client.stream_chat_completion(
@@ -318,6 +325,10 @@ class SynthesizerService:
             messages=synthesis_messages,
             extra_body=extra_body,
         ):
+            if isinstance(chunk, str):
+                yield None, chunk
+                continue
+
             if not preamble_sent:
                 preamble = _preamble_from_chunk(
                     chunk,

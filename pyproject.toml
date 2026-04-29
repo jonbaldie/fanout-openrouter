@@ -28,6 +28,9 @@ packages = ["fanout_openrouter"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "live: marks tests that make real network calls to OpenRouter (skipped in CI)",
+]
 
 [dependency-groups]
 dev = [

@@ -129,7 +129,7 @@ class OpenRouterClient:
         model: str,
         messages: list[ChatMessage],
         extra_body: dict[str, Any] | None,
-    ) -> AsyncIterator[dict[str, Any]]:
+    ) -> AsyncIterator[dict[str, Any] | str]:
         """
         Open a streaming chat completion against OpenRouter and yield each
         parsed data frame as a dict. The `[DONE]` sentinel is consumed and
@@ -169,7 +169,12 @@ class OpenRouterClient:
                 )
 
             async for line in response.aiter_lines():
-                if not line or not line.startswith("data: "):
+                if not line:
+                    continue
+                if line.startswith(": "):
+                    yield line
+                    continue
+                if not line.startswith("data: "):
                     continue
                 payload_str = line[len("data: ") :]
                 if payload_str == "[DONE]":

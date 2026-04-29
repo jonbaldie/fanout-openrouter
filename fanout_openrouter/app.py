@@ -222,8 +222,14 @@ async def _handle_streaming(
     """
     stream_iter = service.stream_chat(request, policy).__aiter__()
 
+    early_comments: list[str] = []
     try:
-        preamble_item = await stream_iter.__anext__()
+        while True:
+            preamble, first_chunk = await stream_iter.__anext__()
+            if preamble is not None:
+                break
+            if isinstance(first_chunk, str):
+                early_comments.append(first_chunk)
     except UpstreamClientError as exc:
         await client.aclose()
         raise FanoutAPIError(
@@ -246,7 +252,6 @@ async def _handle_streaming(
             code="empty_stream",
         ) from None
 
-    preamble, first_chunk = preamble_item
     if preamble is None:
         await client.aclose()
         raise FanoutAPIError(
@@ -257,6 +262,9 @@ async def _handle_streaming(
 
     async def body() -> AsyncIterator[str]:
         try:
+            for comment in early_comments:
+                yield f"{comment}\n\n"
+
             if first_chunk is None:
                 # Upstream yielded no content before closing; emit a synthetic
                 # empty reply so the client sees a valid role/content payload.
@@ -290,6 +298,9 @@ async def _handle_streaming(
             async for preamble_next, chunk in stream_iter:
                 if chunk is None:
                     continue
+                if isinstance(chunk, str):
+                    yield f"{chunk}\n\n"
+                    continue
                 yield _sse_data(
                     _restamp_upstream_chunk(
                         chunk,
@@ -300,6 +311,31 @@ async def _handle_streaming(
                 )
 
             yield _sse_data("[DONE]")
+        except Exception as exc:
+            import logging
+
+            logging.getLogger(__name__).warning("mid_stream_error", exc_info=exc)
+
+            error_data = {
+                "error": {
+                    "message": "upstream error during streaming synthesis",
+                    "code": 502,
+                }
+            }
+            if isinstance(exc, UpstreamClientError):
+                error_data["error"]["message"] = exc.message
+                if exc.code is not None:
+                    error_data["error"]["code"] = exc.code  # type: ignore
+            elif isinstance(exc, AllCandidatesFailedError):
+                error_data["error"]["message"] = str(exc)
+                error_data["error"]["code"] = "all_candidates_failed"  # type: ignore
+            elif hasattr(exc, "upstream_message") and exc.upstream_message:
+                error_data["error"]["message"] = exc.upstream_message
+                if hasattr(exc, "upstream_code") and exc.upstream_code is not None:
+                    error_data["error"]["code"] = exc.upstream_code  # type: ignore
+
+            yield _sse_data(error_data)
+            # Do NOT yield [DONE] after an error block per typical SSE conventions
         finally:
             await client.aclose()
 

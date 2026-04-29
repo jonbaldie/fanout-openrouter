@@ -41,6 +41,8 @@ from typing import Any, Iterator
 import httpx
 import pytest
 
+pytestmark = pytest.mark.live
+
 
 FACADE_MODULE = "fanout_openrouter.app:app"
 VIRTUAL_MODEL = "fanout/minimal"

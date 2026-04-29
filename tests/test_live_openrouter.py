@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import json
 
+import pytest
 from fastapi.testclient import TestClient
+
+pytestmark = pytest.mark.live
 
 from fanout_openrouter.app import create_app
 from fanout_openrouter.settings import Settings

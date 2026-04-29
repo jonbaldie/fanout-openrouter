@@ -11,12 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
-          
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
@@ -24,14 +24,16 @@ jobs:
 
       - name: Install dependencies
         run: uv sync --all-extras
-        
+
       - name: Lint with Ruff
         run: uv run ruff check .
-        
+
       - name: Format check with Ruff
         run: uv run ruff format --check .
-        
-      - name: Run tests
-        env:
-          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
-        run: uv run pytest
+
+      - name: Run tests (non-live only)
+        # CI=true is set automatically by GitHub Actions and causes conftest.py
+        # to skip all tests marked @pytest.mark.live, which make real OpenRouter
+        # API calls. This keeps CI free and avoids requiring secrets on forks.
+        # To run the full suite including live tests: uv run pytest (locally).
+        run: uv run pytest -m "not live"

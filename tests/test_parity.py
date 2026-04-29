@@ -30,6 +30,11 @@ import subprocess
 import sys
 import threading
 import time
+
+import pytest
+
+pytestmark = pytest.mark.live
+
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -189,6 +194,8 @@ def _capture_local_json(
 
 
 def _parse_sse_event(line: str) -> Any:
+    if line.startswith(": "):
+        return {"comment": line.removeprefix(": ")}
     payload = line.removeprefix("data: ")
     if payload == "[DONE]":
         return payload
@@ -234,7 +241,7 @@ def _capture_oracle_stream(
         events = [
             _parse_sse_event(line)
             for line in response.iter_lines()
-            if line.startswith("data: ")
+            if line.startswith("data: ") or line.startswith(": ")
         ]
         _log(f"oracle stream status={response.status_code} events={len(events)}")
         return Snapshot(
@@ -336,7 +343,17 @@ def _diff_snapshots(oracle: Snapshot, local: Snapshot) -> list[str]:
             f"oracle={oracle.content_type!r} local={local.content_type!r}"
         )
 
-    problems.extend(_diff_json(oracle.json_body, local.json_body))
+    # Filter out keep-alive comments from body before shape diffing,
+    # because their count and exact placement are non-deterministic.
+    def _strip_comments(body: Any) -> Any:
+        if isinstance(body, list):
+            return [x for x in body if not (isinstance(x, dict) and "comment" in x)]
+        return body
+
+    oracle_body = _strip_comments(oracle.json_body)
+    local_body = _strip_comments(local.json_body)
+
+    problems.extend(_diff_json(oracle_body, local_body))
     return problems
 
 
