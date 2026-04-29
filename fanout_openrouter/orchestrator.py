@@ -97,33 +97,6 @@ class SynthesizerService:
         request: ChatCompletionRequest,
         policy: FanoutPolicy,
     ) -> OrchestratedResponse:
-        # Tool-calling requests cannot be synthesized because synthesis would
-        # need to emit a precise JSON payload on behalf of candidates, which
-        # breaks the deterministic contract of tools. Bypass fan-out entirely.
-        if request.candidate_request_body().get("tools"):
-            logger.info("tools_present_bypassing_fanout")
-            result, failure, final_model = await self._run_with_default_model_retry(
-                request.messages,
-                policy.candidate_models[0]
-                if policy.candidate_models
-                else policy.default_fallback_model,
-                policy.default_fallback_model,
-                request.candidate_request_body(),
-            )
-            if failure is not None:
-                raise failure.last_exception or OpenRouterError(failure.message)
-            if result is None:
-                raise OpenRouterError("candidate returned no result")
-            return OrchestratedResponse(
-                content=result.content,
-                model=result.model,
-                provider=result.provider,
-                system_fingerprint=result.system_fingerprint,
-                choice=result.choice,
-                usage=result.usage,
-                synthesized=False,
-            )
-
         distributed = distribute_models(
             list(policy.candidate_models), policy.fanout_count
         )
@@ -165,22 +138,6 @@ class SynthesizerService:
                 "all candidates failed: " + "; ".join(failures)
             )
 
-        # Tool-call responses cannot be meaningfully synthesized: the caller
-        # needs the exact tool invocations the upstream model produced. If
-        # any candidate returned with tool_calls, pass that one through
-        # unchanged rather than running it through a synthesis step.
-        tool_call_candidate = next((c for c in candidates if c.tool_calls), None)
-        if tool_call_candidate is not None:
-            return OrchestratedResponse(
-                content=tool_call_candidate.content,
-                model=tool_call_candidate.model,
-                provider=tool_call_candidate.provider,
-                system_fingerprint=tool_call_candidate.system_fingerprint,
-                choice=tool_call_candidate.choice,
-                usage=tool_call_candidate.usage,
-                synthesized=False,
-            )
-
         if len(candidates) == 1:
             candidate = candidates[0]
             return OrchestratedResponse(
@@ -195,7 +152,7 @@ class SynthesizerService:
 
         synthesis_prompt = build_synthesis_prompt(
             serialize_messages(request.messages),
-            [candidate.content for candidate in candidates],
+            [_format_candidate_response(candidate) for candidate in candidates],
         )
         synthesis_messages = [ChatMessage(role="user", content=synthesis_prompt)]
         final_result, synth_failure, _ = await self._run_with_default_model_retry(
@@ -254,41 +211,7 @@ class SynthesizerService:
         built from the first candidate so the wire contract stays
         consistent from the client's perspective.
         """
-        if request.candidate_request_body().get("tools"):
-            model = (
-                policy.candidate_models[0]
-                if policy.candidate_models
-                else policy.default_fallback_model
-            )
-            logger.info("tools_present_bypassing_fanout_stream", extra={"model": model})
-            async for item in self._stream_one_synthesis_attempt(
-                request.messages,
-                model,
-                request.candidate_request_body(),
-                synthesized=False,
-            ):
-                yield item
-            return
-
         candidates = await self._run_candidates(request, policy)
-
-        tool_call_candidate = next((c for c in candidates if c.tool_calls), None)
-        if tool_call_candidate is not None:
-            preamble = StreamPreamble(
-                model=tool_call_candidate.model,
-                provider=tool_call_candidate.provider,
-                system_fingerprint=tool_call_candidate.system_fingerprint,
-                synthesized=False,
-            )
-            buffered = _buffered_deltas(tool_call_candidate)
-            if buffered:
-                yield preamble, buffered[0]
-                for delta in buffered[1:]:
-                    await asyncio.sleep(0.02)
-                    yield None, delta
-            else:
-                yield preamble, None
-            return
 
         if len(candidates) == 1:
             candidate = candidates[0]
@@ -310,7 +233,7 @@ class SynthesizerService:
 
         synthesis_prompt = build_synthesis_prompt(
             serialize_messages(request.messages),
-            [candidate.content for candidate in candidates],
+            [_format_candidate_response(candidate) for candidate in candidates],
         )
         synthesis_messages = [ChatMessage(role="user", content=synthesis_prompt)]
         extra_body = request.synthesis_request_body()
@@ -610,11 +533,26 @@ def serialize_messages(messages: list[ChatMessage]) -> str:
     return "\n\n".join(blocks)
 
 
+
+def _format_candidate_response(candidate: CompletionResult) -> str:
+    parts = []
+    if candidate.content:
+        parts.append(candidate.content.strip())
+    if candidate.tool_calls:
+        for tc in candidate.tool_calls:
+            func = tc.get("function", {})
+            name = func.get("name", "unknown")
+            args = func.get("arguments", "{}")
+            parts.append(f"[Tool Call: {name}({args})]")
+    if not parts:
+        return "[Empty response]"
+    return "\n".join(parts)
+
 def build_synthesis_prompt(original_prompt: str, candidates: list[str]) -> str:
     parts = [original_prompt, "\n\n---\n\n"]
     parts.append(
         f"Below are {len(candidates)} candidate responses. "
-        "Synthesize them into a single final answer and respond only with your synthesis in the same format.\n\n"
+        "Synthesize them into a single final answer. If the candidates indicate they wanted to call a tool (shown as [Tool Call: ...]), you MUST execute the corresponding tool using the native tool calling mechanism, rather than outputting text.\n\n"
     )
     for index, candidate in enumerate(candidates, start=1):
         parts.append(

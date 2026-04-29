@@ -29,14 +29,7 @@ class ChatCompletionRequest(BaseModel):
         return body
 
     def synthesis_request_body(self) -> dict[str, Any]:
-        body = self.candidate_request_body()
-        for key in (
-            "tool_choice",
-            "tools",
-            "parallel_tool_calls",
-        ):
-            body.pop(key, None)
-        return body
+        return self.candidate_request_body()
 
 
 class ResponseMessage(BaseModel):
