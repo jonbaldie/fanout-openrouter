@@ -28,6 +28,22 @@ class AllCandidatesFailedError(RuntimeError):
     pass
 
 
+class UpstreamClientError(RuntimeError):
+    """All candidates failed with the same non-retryable upstream 4xx."""
+
+    def __init__(
+        self,
+        *,
+        status_code: int,
+        message: str,
+        code: int | str | None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.message = message
+        self.code = code
+
+
 @dataclass(frozen=True)
 class OrchestratedResponse:
     content: str
@@ -37,6 +53,12 @@ class OrchestratedResponse:
     choice: dict[str, object]
     usage: dict[str, object] | None
     synthesized: bool
+
+
+@dataclass(frozen=True)
+class CandidateFailure:
+    message: str
+    last_exception: OpenRouterError | None
 
 
 class SynthesizerService:
@@ -72,13 +94,15 @@ class SynthesizerService:
 
         candidates: list[CompletionResult] = []
         failures: list[str] = []
-        for index, (result, error, final_model) in enumerate(results, start=1):
-            if error:
+        failure_exceptions: list[OpenRouterError | None] = []
+        for index, (result, failure, final_model) in enumerate(results, start=1):
+            if failure is not None:
                 logger.warning(
                     "candidate_failed",
-                    extra={"candidate_index": index, "error": error},
+                    extra={"candidate_index": index, "error": failure.message},
                 )
-                failures.append(f"candidate {index} ({final_model}): {error}")
+                failures.append(f"candidate {index} ({final_model}): {failure.message}")
+                failure_exceptions.append(failure.last_exception)
                 continue
 
             logger.info(
@@ -88,6 +112,9 @@ class SynthesizerService:
             candidates.append(result)
 
         if not candidates:
+            shared = _shared_upstream_client_error(failure_exceptions)
+            if shared is not None:
+                raise shared
             raise AllCandidatesFailedError(
                 "all candidates failed: " + "; ".join(failures)
             )
@@ -109,15 +136,15 @@ class SynthesizerService:
             [candidate.content for candidate in candidates],
         )
         synthesis_messages = [ChatMessage(role="user", content=synthesis_prompt)]
-        final_result, error, _ = await self._run_with_default_model_retry(
+        final_result, synth_failure, _ = await self._run_with_default_model_retry(
             synthesis_messages,
             policy.synthesis_model,
             policy.default_fallback_model,
             request.synthesis_request_body(),
         )
 
-        if error:
-            logger.warning("synthesis_failed", extra={"error": error})
+        if synth_failure is not None:
+            logger.warning("synthesis_failed", extra={"error": synth_failure.message})
             candidate = candidates[0]
             return OrchestratedResponse(
                 content=candidate.content,
@@ -145,30 +172,35 @@ class SynthesizerService:
         model: str,
         default_model: str,
         extra_body: dict[str, object] | None,
-    ) -> tuple[CompletionResult | None, str | None, str]:
-        result, error = await self._run_with_retry(messages, model, extra_body)
+    ) -> tuple[CompletionResult | None, CandidateFailure | None, str]:
+        result, failure = await self._run_with_retry(messages, model, extra_body)
         if (
-            error or result is None or not result.content.strip()
+            failure is not None or result is None or not result.content.strip()
         ) and model != default_model:
             logger.warning(
                 "primary_model_failed_retrying_default",
-                extra={"model": model, "default_model": default_model, "error": error},
+                extra={
+                    "model": model,
+                    "default_model": default_model,
+                    "error": failure.message if failure else None,
+                },
             )
-            result, error = await self._run_with_retry(
+            result, failure = await self._run_with_retry(
                 messages,
                 default_model,
                 extra_body,
             )
-            return result, error, default_model
-        return result, error, model
+            return result, failure, default_model
+        return result, failure, model
 
     async def _run_with_retry(
         self,
         messages: list[ChatMessage],
         model: str,
         extra_body: dict[str, object] | None,
-    ) -> tuple[CompletionResult | None, str | None]:
+    ) -> tuple[CompletionResult | None, CandidateFailure | None]:
         last_error: str | None = None
+        last_exception: OpenRouterError | None = None
         for attempt in range(1, self._max_attempts + 1):
             if attempt > 1:
                 delay = min(2 ** (attempt - 2), 60)
@@ -191,22 +223,78 @@ class SynthesizerService:
                 )
             except OpenRouterError as exc:
                 last_error = str(exc)
+                last_exception = exc
                 if attempt < self._max_attempts and exc.retryable:
                     continue
-                return None, last_error
+                return None, CandidateFailure(
+                    message=last_error,
+                    last_exception=last_exception,
+                )
 
             if not result.content.strip():
                 last_error = "empty response"
+                last_exception = None
                 if attempt < self._max_attempts:
                     continue
-                return None, last_error
+                return None, CandidateFailure(
+                    message=last_error,
+                    last_exception=last_exception,
+                )
 
             return result, None
 
         return (
             None,
-            f"all {self._max_attempts} attempts failed (last error: {last_error})",
+            CandidateFailure(
+                message=(
+                    f"all {self._max_attempts} attempts failed "
+                    f"(last error: {last_error})"
+                ),
+                last_exception=last_exception,
+            ),
         )
+
+
+def _shared_upstream_client_error(
+    exceptions: list[OpenRouterError | None],
+) -> UpstreamClientError | None:
+    if not exceptions:
+        return None
+
+    status_codes: set[int] = set()
+    messages: set[str] = set()
+    codes: set[int | str] = set()
+    for exc in exceptions:
+        if exc is None or exc.status_code is None:
+            return None
+        if exc.retryable:
+            return None
+        if exc.status_code < 400 or exc.status_code >= 500:
+            return None
+        status_codes.add(exc.status_code)
+        if exc.upstream_message is not None:
+            messages.add(exc.upstream_message)
+        if exc.upstream_code is not None:
+            codes.add(exc.upstream_code)
+
+    if len(status_codes) != 1:
+        return None
+
+    # Need at least a consistent upstream message to echo; otherwise bail.
+    if len(messages) != 1:
+        return None
+
+    (status_code,) = tuple(status_codes)
+    (message,) = tuple(messages)
+    code: int | str | None = None
+    if len(codes) == 1:
+        (code,) = tuple(codes)
+
+    return UpstreamClientError(
+        status_code=status_code,
+        message=message,
+        code=code,
+    )
 
 
 def distribute_models(model_pool: list[str], n: int) -> list[str]:

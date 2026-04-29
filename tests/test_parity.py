@@ -132,6 +132,7 @@ def _capture_local_json(
     path: str,
     body: dict[str, Any] | None,
     timeout: float = 90.0,
+    headers: dict[str, str] | None = None,
 ) -> Snapshot:
     _log(f"local POST {path} (timeout={timeout}s)")
 
@@ -139,7 +140,7 @@ def _capture_local_json(
 
     def _do_call() -> None:
         try:
-            response = client.post(path, json=body)
+            response = client.post(path, json=body, headers=headers)
             result["response"] = response
         except Exception as exc:  # noqa: BLE001
             result["error"] = exc
@@ -475,5 +476,41 @@ def test_parity_chat_missing_messages_error(
         rendered = "\n  - ".join(diffs)
         _log(f"FAIL: {len(diffs)} diffs")
         pytest.fail(f"parity drift in chat_missing_messages_error:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_invalid_bearer_error(
+    local_client_without_embedded_key: TestClient,
+) -> None:
+    _log("case: chat_invalid_bearer_error")
+
+    bad_key = "sk-or-v1-definitely-not-a-valid-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter with bad bearer")
+    oracle = _capture_oracle_json(bad_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade with bad bearer")
+    local = _capture_local_json(
+        local_client_without_embedded_key,
+        "/api/v1/chat/completions",
+        local_body,
+        headers={"Authorization": f"Bearer {bad_key}"},
+    )
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_invalid_bearer_error:\n  - {rendered}")
 
     _log("PASS")

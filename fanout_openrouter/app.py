@@ -23,7 +23,11 @@ from .models import (
     ResponseMessage,
 )
 from .openrouter_client import OpenRouterClient
-from .orchestrator import AllCandidatesFailedError, SynthesizerService
+from .orchestrator import (
+    AllCandidatesFailedError,
+    SynthesizerService,
+    UpstreamClientError,
+)
 from .policy import PolicyRegistry
 from .settings import Settings
 
@@ -121,6 +125,12 @@ def create_app(
 
         try:
             result = await service.complete_chat(request, policy)
+        except UpstreamClientError as exc:
+            raise FanoutAPIError(
+                exc.status_code,
+                exc.message,
+                code=exc.code,
+            ) from exc
         except AllCandidatesFailedError as exc:
             raise FanoutAPIError(
                 502,
