@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -738,5 +739,223 @@ def test_parity_models_list_shape(local_client: TestClient) -> None:
         rendered = "\n  - ".join(problems)
         _log(f"FAIL: {len(problems)} diffs")
         pytest.fail(f"parity drift in models_list_shape:\n  - {rendered}")
+
+    _log("PASS")
+
+
+# ---------- streaming progressiveness ----------
+
+# OpenRouter streams tokens as they are produced upstream. A conformant facade
+# must do the same. Buffering the full response and re-slicing it into fake
+# SSE chunks at the end would pass the earlier shape-only parity test because
+# content is normalized, but it's not the contract. This harness measures the
+# wall-clock arrival times of content-bearing deltas and asserts the stream is
+# actually progressive: time-to-first-byte is meaningfully earlier than the
+# end of the stream.
+
+
+@dataclass
+class StreamTiming:
+    total_events: int
+    content_events: int
+    first_event_seconds: float
+    last_event_seconds: float
+    first_content_seconds: float
+    last_content_seconds: float
+
+
+def _capture_stream_timing_oracle(
+    api_key: str,
+    body: dict[str, Any],
+) -> StreamTiming:
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    start = time.monotonic()
+    event_times: list[float] = []
+    content_times: list[float] = []
+    _log(f"oracle STREAM POST {OPENROUTER_BASE_URL}/chat/completions (timing)")
+    with httpx.stream(
+        "POST",
+        f"{OPENROUTER_BASE_URL}/chat/completions",
+        headers=headers,
+        json=body,
+        timeout=60.0,
+    ) as response:
+        assert response.status_code == 200, response.read()
+        for line in response.iter_lines():
+            if not line.startswith("data: "):
+                continue
+            elapsed = time.monotonic() - start
+            event_times.append(elapsed)
+            payload = line.removeprefix("data: ")
+            if payload == "[DONE]":
+                continue
+            try:
+                parsed = json.loads(payload)
+            except ValueError:
+                continue
+            if _event_has_content(parsed):
+                content_times.append(elapsed)
+    return _finalize_timing(event_times, content_times)
+
+
+def _capture_stream_timing_local(
+    client: TestClient,
+    body: dict[str, Any],
+    timeout: float = 120.0,
+) -> StreamTiming:
+    event_times: list[float] = []
+    content_times: list[float] = []
+    result: dict[str, Any] = {}
+    _log("local STREAM POST /api/v1/chat/completions (timing)")
+
+    def _do_call() -> None:
+        try:
+            start = time.monotonic()
+            with client.stream(
+                "POST",
+                "/api/v1/chat/completions",
+                json=body,
+            ) as response:
+                result["status_code"] = response.status_code
+                if response.status_code != 200:
+                    result["error_body"] = response.read()
+                    return
+                for line in response.iter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    elapsed = time.monotonic() - start
+                    event_times.append(elapsed)
+                    payload = line.removeprefix("data: ")
+                    if payload == "[DONE]":
+                        continue
+                    try:
+                        parsed = json.loads(payload)
+                    except ValueError:
+                        continue
+                    if _event_has_content(parsed):
+                        content_times.append(elapsed)
+        except Exception as exc:  # noqa: BLE001
+            result["error"] = exc
+
+    thread = threading.Thread(target=_do_call, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout)
+
+    if thread.is_alive():
+        raise AssertionError(f"local facade did not finish streaming within {timeout}s")
+    if "error" in result:
+        raise result["error"]
+    if result.get("status_code") != 200:
+        raise AssertionError(
+            f"local stream returned status={result.get('status_code')} "
+            f"body={result.get('error_body')!r}"
+        )
+    return _finalize_timing(event_times, content_times)
+
+
+def _event_has_content(parsed: Any) -> bool:
+    if not isinstance(parsed, dict):
+        return False
+    choices = parsed.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return False
+    delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+    if not isinstance(delta, dict):
+        return False
+    content = delta.get("content")
+    return isinstance(content, str) and len(content) > 0
+
+
+def _finalize_timing(
+    event_times: list[float],
+    content_times: list[float],
+) -> StreamTiming:
+    if not event_times:
+        raise AssertionError("stream produced no data events")
+    if not content_times:
+        raise AssertionError("stream produced no content-bearing deltas")
+    return StreamTiming(
+        total_events=len(event_times),
+        content_events=len(content_times),
+        first_event_seconds=event_times[0],
+        last_event_seconds=event_times[-1],
+        first_content_seconds=content_times[0],
+        last_content_seconds=content_times[-1],
+    )
+
+
+def _assert_progressive(label: str, timing: StreamTiming) -> None:
+    _log(
+        f"{label} timing: events={timing.total_events} "
+        f"content_events={timing.content_events} "
+        f"first_content={timing.first_content_seconds:.3f}s "
+        f"last_content={timing.last_content_seconds:.3f}s "
+        f"span={timing.last_content_seconds - timing.first_content_seconds:.3f}s"
+    )
+
+    problems: list[str] = []
+    if timing.content_events < 3:
+        problems.append(
+            f"expected at least 3 content-bearing deltas, got {timing.content_events}"
+        )
+
+    span = timing.last_content_seconds - timing.first_content_seconds
+    if span < 0.2:
+        problems.append(
+            f"content deltas arrived within {span:.3f}s - looks buffered, not streamed"
+        )
+
+    # If the stream is genuinely progressive, the first content delta must
+    # arrive meaningfully earlier than the final one. A buffered facade that
+    # waits for the full response, then slices it and flushes all chunks at
+    # once, produces first~=last which fails this check even when the total
+    # upstream work took many seconds.
+    total = max(timing.last_content_seconds, 0.001)
+    first_fraction = timing.first_content_seconds / total
+    if first_fraction > 0.9:
+        problems.append(
+            f"first content delta arrived at {first_fraction:.0%} of total "
+            f"stream duration - upstream tokens are being buffered before emit"
+        )
+
+    if problems:
+        rendered = "\n  - ".join(problems)
+        pytest.fail(f"{label} stream is not progressive:\n  - {rendered}")
+
+
+def test_parity_chat_stream_is_progressive(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    """
+    Real OpenRouter streams deltas as tokens are produced. Our facade must
+    do the same rather than buffer the whole synthesis response and then
+    slice it into fake SSE chunks. We prove this by measuring wall-clock
+    arrival times of content-bearing deltas and asserting the stream is
+    actually progressive, on both sides.
+    """
+    _log("case: chat_stream_is_progressive")
+
+    # A prompt that guarantees a long-enough response for streaming signal
+    # to be measurable, even on fast models.
+    prompt = "Write a 200-word paragraph about the history of typewriters."
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": 400,
+        "stream": True,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/2: measuring real OpenRouter stream")
+    oracle_timing = _capture_stream_timing_oracle(api_key, oracle_body)
+    _assert_progressive("oracle", oracle_timing)
+
+    _log("step 2/2: measuring local facade stream")
+    local_timing = _capture_stream_timing_local(local_client, local_body)
+    _assert_progressive("local", local_timing)
 
     _log("PASS")
