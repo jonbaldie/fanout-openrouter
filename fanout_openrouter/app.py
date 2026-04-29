@@ -34,14 +34,12 @@ class FanoutAPIError(RuntimeError):
         status_code: int,
         message: str,
         *,
-        error_type: str,
-        code: str | None = None,
+        code: int | str | None = None,
         param: str | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.message = message
-        self.error_type = error_type
         self.code = code
         self.param = param
 
@@ -67,9 +65,7 @@ def create_app(
         return _error_response(
             status_code=exc.status_code,
             message=exc.message,
-            error_type=exc.error_type,
             code=exc.code,
-            param=exc.param,
         )
 
     @app.exception_handler(RequestValidationError)
@@ -80,9 +76,7 @@ def create_app(
         return _error_response(
             status_code=400,
             message=_validation_error_message(exc),
-            error_type="invalid_request_error",
-            code="invalid_request",
-            param=_validation_error_param(exc),
+            code=400,
         )
 
     @app.get("/api/v1/models", response_model=ModelsResponse)
@@ -104,10 +98,8 @@ def create_app(
         if policy is None:
             raise FanoutAPIError(
                 400,
-                f"unsupported virtual model: {request.model}",
-                error_type="invalid_request_error",
-                code="model_not_found",
-                param="model",
+                f"{request.model} is not a valid model ID",
+                code=400,
             )
 
         settings = app.state.settings
@@ -115,9 +107,8 @@ def create_app(
         if not api_key:
             raise FanoutAPIError(
                 401,
-                "OPENROUTER_API_KEY or Authorization: Bearer <token> is required",
-                error_type="authentication_error",
-                code="missing_api_key",
+                "No cookie auth credentials found",
+                code=401,
             )
 
         client = OpenRouterClient(
@@ -134,7 +125,6 @@ def create_app(
             raise FanoutAPIError(
                 502,
                 str(exc),
-                error_type="api_error",
                 code="all_candidates_failed",
             ) from exc
         finally:
@@ -332,14 +322,12 @@ def _error_response(
     *,
     status_code: int,
     message: str,
-    error_type: str,
-    code: str | None = None,
+    code: int | str | None = None,
     param: str | None = None,
 ) -> JSONResponse:
     body = ErrorResponse(
         error=ErrorDetail(
             message=message,
-            type=error_type,
             param=param,
             code=code,
         )
@@ -352,6 +340,9 @@ def _error_response(
 
 def _validation_error_message(exc: RequestValidationError) -> str:
     param = _validation_error_param(exc)
+    if param == "messages":
+        return 'Input required: specify "prompt" or "messages"'
+
     first_error = exc.errors()[0] if exc.errors() else None
     message = (
         first_error.get("msg", "invalid request") if first_error else "invalid request"

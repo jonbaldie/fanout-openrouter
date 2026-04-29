@@ -182,10 +182,8 @@ def test_unsupported_virtual_model_returns_structured_error() -> None:
     assert response.status_code == 400, response.text
     assert response.json() == {
         "error": {
-            "message": "unsupported virtual model: fanout/does-not-exist",
-            "type": "invalid_request_error",
-            "param": "model",
-            "code": "model_not_found",
+            "message": "fanout/does-not-exist is not a valid model ID",
+            "code": 400,
         }
     }
 
@@ -202,10 +200,8 @@ def test_missing_messages_returns_structured_validation_error() -> None:
     assert response.status_code == 400, response.text
     assert response.json() == {
         "error": {
-            "message": "messages: Field required",
-            "type": "invalid_request_error",
-            "param": "messages",
-            "code": "invalid_request",
+            "message": 'Input required: specify "prompt" or "messages"',
+            "code": 400,
         }
     }
 
@@ -226,8 +222,7 @@ def test_missing_api_key_returns_structured_auth_error() -> None:
     assert response.status_code == 401, response.text
     assert response.json() == {
         "error": {
-            "message": "OPENROUTER_API_KEY or Authorization: Bearer <token> is required",
-            "type": "authentication_error",
-            "code": "missing_api_key",
+            "message": "No cookie auth credentials found",
+            "code": 401,
         }
     }

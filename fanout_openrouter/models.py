@@ -74,13 +74,18 @@ class ChatCompletionResponse(BaseModel):
 
 class ErrorDetail(BaseModel):
     message: str
-    type: str
+    code: int | str | None = None
+    type: str | None = None
     param: str | None = None
-    code: str | None = None
+
+    model_config = ConfigDict(extra="allow")
 
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+    user_id: str | None = None
+
+    model_config = ConfigDict(extra="allow")
 
 
 class ModelCard(BaseModel):

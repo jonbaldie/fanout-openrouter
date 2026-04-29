@@ -62,6 +62,8 @@ def _normalize(value: Any) -> Any:
     if isinstance(value, dict):
         out: dict[str, Any] = {}
         for key, inner in value.items():
+            if key == "user_id":
+                continue
             if key in NORMALIZED_SCALAR_KEYS:
                 out[key] = "<normalized>"
             elif (
@@ -343,6 +345,20 @@ def local_client(api_key: str) -> TestClient:
     return client
 
 
+@pytest.fixture(scope="module")
+def local_client_without_embedded_key() -> TestClient:
+    loaded = Settings.from_env()
+    app = create_app(
+        settings=Settings(
+            openrouter_api_key=None,
+            openrouter_base_url=loaded.openrouter_base_url,
+            request_timeout_seconds=loaded.request_timeout_seconds,
+            policy_file=loaded.policy_file,
+        )
+    )
+    return TestClient(app)
+
+
 # ---------- tracer bullet case ----------
 
 
@@ -397,5 +413,67 @@ def test_parity_chat_stream_happy(api_key: str, local_client: TestClient) -> Non
         rendered = "\n  - ".join(diffs)
         _log(f"FAIL: {len(diffs)} diffs")
         pytest.fail(f"parity drift in chat_stream_happy:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_missing_auth_error(
+    local_client_without_embedded_key: TestClient,
+) -> None:
+    _log("case: chat_missing_auth_error")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter without auth")
+    oracle = _capture_oracle_json("", "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade without auth")
+    local = _capture_local_json(
+        local_client_without_embedded_key,
+        "/api/v1/chat/completions",
+        local_body,
+    )
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_missing_auth_error:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_missing_messages_error(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    _log("case: chat_missing_messages_error")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "max_tokens": 10,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter invalid request")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade invalid request")
+    local = _capture_local_json(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_missing_messages_error:\n  - {rendered}")
 
     _log("PASS")
