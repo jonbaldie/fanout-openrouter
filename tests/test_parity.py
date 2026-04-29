@@ -47,7 +47,7 @@ from fanout_openrouter.app import create_app
 from fanout_openrouter.settings import Settings
 
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-ORACLE_MODEL = "google/gemini-3-flash-preview"
+ORACLE_MODEL = "anthropic/claude-haiku-4.5"
 LOCAL_VIRTUAL_MODEL = "fanout/minimal"
 
 

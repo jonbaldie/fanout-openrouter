@@ -63,8 +63,8 @@ Example `fanout_policies.json`:
     {
       "virtual_model": "fanout/minimal",
       "candidate_models": [
-        "google/gemini-3-flash-preview",
-        "openai/gpt-4o-mini"
+        "anthropic/claude-haiku-4.5",
+        "openai/gpt-5.4-nano"
       ],
       "fanout_count": 2,
       "created": 1710000000

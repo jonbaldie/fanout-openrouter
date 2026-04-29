@@ -52,18 +52,42 @@ bd close <id>         # Complete work
 
 ## Build & Test
 
-_Add your build and test commands here_
-
 ```bash
-# Example:
-# npm install
-# npm test
+# Install / update deps
+uv sync --all-extras
+
+# Run the full test suite (hits real OpenRouter by default)
+uv run pytest
+
+# Run parity tests only
+uv run pytest tests/test_parity.py -v -s --tb=short
+
+# Lint and format
+uv run ruff check .
+uv run ruff format .
+
+# Run the server locally
+uv run uvicorn fanout_openrouter.app:app --reload
 ```
+
+`OPENROUTER_API_KEY` must be set in env or `.env` for live tests to pass.
 
 ## Architecture Overview
 
-_Add a brief overview of your project architecture_
+FastAPI facade that fans out a single `/api/v1/chat/completions` request to multiple upstream OpenRouter models concurrently, then synthesizes their responses into one. Implements the OpenAI/OpenRouter wire contract exactly (request shape, response shape, error shape, SSE streaming).
+
+Key modules:
+- `fanout_openrouter/app.py` — FastAPI app, SSE streaming assembly
+- `fanout_openrouter/orchestrator.py` — SynthesizerService: fan-out, retry, fallback, synthesis
+- `fanout_openrouter/openrouter_client.py` — httpx client against real OpenRouter
+- `fanout_openrouter/policy.py` — Virtual model → candidate-model registry (loaded from `fanout_policies.json`)
+- `fanout_openrouter/models.py` — Pydantic v2 wire models
+- `fanout_openrouter/settings.py` — Env/.env driven settings
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+- Match OpenRouter/OpenAI wire shapes exactly — any divergence is a bug, not a choice.
+- Live smoke tests run by default; do not hide contract-critical behavior behind mocks.
+- Parity tests (`tests/test_parity.py`) are the oracle: hit real OpenRouter, hit local facade, diff the wire shape.
+- Keep changes small. Extend only when there is a concrete, tested need.
+- `uv run pytest` must be fully green before committing a slice.

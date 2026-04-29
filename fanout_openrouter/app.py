@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 import uuid
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 from collections import defaultdict
 
 import httpx
@@ -22,13 +22,13 @@ from .models import (
     ModelCard,
     ModelsResponse,
 )
-from .openrouter_client import OpenRouterClient
+from .openrouter_client import OpenRouterClient, OpenRouterError
 from .orchestrator import (
     AllCandidatesFailedError,
     SynthesizerService,
     UpstreamClientError,
 )
-from .policy import PolicyRegistry
+from .policy import FanoutPolicy, PolicyRegistry
 from .settings import Settings
 from .logging import configure_logging
 
@@ -130,13 +130,7 @@ def create_app(
         request: ChatCompletionRequest,
         authorization: str | None = Header(default=None),
     ) -> ChatCompletionResponse | StreamingResponse:
-        policy = app.state.policy_registry.get(request.model)
-        if policy is None:
-            raise FanoutAPIError(
-                400,
-                f"{request.model} is not a valid model ID",
-                code=400,
-            )
+        policy = _resolve_policy(request, app.state.policy_registry)
 
         settings = app.state.settings
         api_key = settings.openrouter_api_key or _extract_bearer_token(authorization)
@@ -160,9 +154,26 @@ def create_app(
             timeout=settings.request_timeout_seconds,
             transport=app.state.transport,
         )
-        service = SynthesizerService(client, sleep_func=app.state.sleep_func)
         response_id = f"chatcmpl-{uuid.uuid4().hex}"
         created = int(time.time())
+
+        # Pass-through: no policy matched and no inline models list provided.
+        if policy is None:
+            if request.stream:
+                return await _handle_passthrough_stream(
+                    client=client,
+                    request=request,
+                    response_id=response_id,
+                    created=created,
+                )
+            return await _handle_passthrough_non_stream(
+                client=client,
+                request=request,
+                response_id=response_id,
+                created=created,
+            )
+
+        service = SynthesizerService(client, sleep_func=app.state.sleep_func)
 
         if request.stream:
             return await _handle_streaming(
@@ -202,6 +213,142 @@ def create_app(
         )
 
     return app
+
+
+def _resolve_policy(
+    request: ChatCompletionRequest,
+    registry: PolicyRegistry,
+) -> FanoutPolicy | None:
+    """
+    Determine how to route the request.
+
+    Priority order:
+      1. Inline ``models`` list  -> ad-hoc fan-out policy built from that list.
+      2. Named virtual model     -> registered policy from the policy file.
+      3. Anything else           -> None (caller should pass through to OpenRouter).
+    """
+    if request.models:
+        candidates = tuple(request.models)
+        return FanoutPolicy(
+            virtual_model=request.model,
+            candidate_models=candidates,
+            synthesis_model=candidates[0],
+            fanout_count=len(candidates),
+            default_fallback_model=candidates[0],
+            created=int(time.time()),
+        )
+    return registry.get(request.model)
+
+
+async def _handle_passthrough_non_stream(
+    *,
+    client: OpenRouterClient,
+    request: ChatCompletionRequest,
+    response_id: str,
+    created: int,
+) -> ChatCompletionResponse:
+    """Proxy a single-model (non-fan-out) non-streaming request to OpenRouter."""
+    extra = request.passthrough_request_body()
+    try:
+        result = await client.create_chat_completion(
+            model=request.model,
+            messages=request.messages,
+            extra_body=extra or None,
+        )
+    except OpenRouterError as exc:
+        raise FanoutAPIError(
+            exc.status_code or 502,
+            exc.upstream_message or str(exc),
+            code=exc.upstream_code,
+        ) from exc
+    finally:
+        await client.aclose()
+    return ChatCompletionResponse(
+        id=response_id,
+        created=created,
+        model=result.model,
+        provider=result.provider,
+        system_fingerprint=result.system_fingerprint,
+        choices=[Choice.model_validate(result.choice)],
+        usage=result.usage,
+    )
+
+
+async def _handle_passthrough_stream(
+    *,
+    client: OpenRouterClient,
+    request: ChatCompletionRequest,
+    response_id: str,
+    created: int,
+) -> StreamingResponse:
+    """
+    Proxy a single-model streaming request to OpenRouter.
+
+    Pre-rolls the first chunk before committing to SSE headers so that auth /
+    routing errors surface as JSON (matching OpenRouter's own behaviour).
+    """
+    extra = request.passthrough_request_body()
+    stream_iter = client.stream_chat_completion(
+        model=request.model,
+        messages=request.messages,
+        extra_body=extra or None,
+    ).__aiter__()
+
+    try:
+        first: dict[str, Any] | str = await stream_iter.__anext__()
+    except OpenRouterError as exc:
+        await client.aclose()
+        raise FanoutAPIError(
+            exc.status_code or 502,
+            exc.upstream_message or str(exc),
+            code=exc.upstream_code,
+        ) from exc
+    except StopAsyncIteration:
+        await client.aclose()
+        raise FanoutAPIError(502, "upstream returned empty stream", code="empty_stream")
+
+    async def body() -> AsyncIterator[str]:
+        try:
+            if isinstance(first, str):
+                yield f"{first}\n\n"
+            else:
+                yield _sse_data(
+                    _restamp_id_created(first, response_id=response_id, created=created)
+                )
+            async for chunk in stream_iter:
+                if isinstance(chunk, str):
+                    yield f"{chunk}\n\n"
+                    continue
+                yield _sse_data(
+                    _restamp_id_created(chunk, response_id=response_id, created=created)
+                )
+            yield _sse_data("[DONE]")
+        except OpenRouterError as exc:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "passthrough_stream_error", exc_info=exc
+            )
+            yield _sse_data(
+                {
+                    "error": {
+                        "message": exc.upstream_message or str(exc),
+                        "code": exc.upstream_code or exc.status_code or 502,
+                    }
+                }
+            )
+        finally:
+            await client.aclose()
+
+    return StreamingResponse(
+        body(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 async def _handle_streaming(
@@ -364,6 +511,20 @@ def _role_from_chunk(chunk: dict[str, object] | None) -> str | None:
         return None
     role = delta.get("role")
     return role if isinstance(role, str) and role else None
+
+
+def _restamp_id_created(
+    chunk: dict[str, object],
+    *,
+    response_id: str,
+    created: int,
+) -> dict[str, object]:
+    """Rewrite only id/created/object on a pass-through chunk; everything else flows as-is."""
+    copy = dict(chunk)
+    copy["id"] = response_id
+    copy["created"] = created
+    copy["object"] = "chat.completion.chunk"
+    return copy
 
 
 def _restamp_upstream_chunk(

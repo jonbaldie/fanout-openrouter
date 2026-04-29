@@ -15,21 +15,36 @@ class ChatMessage(BaseModel):
 class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage]
+    # Optional per-request candidate list. When provided, the proxy fans out to
+    # these models rather than looking up a named virtual-model policy.
+    models: list[str] | None = None
     temperature: float | None = None
     stream: bool = False
 
     model_config = ConfigDict(extra="allow")
 
     def candidate_request_body(self) -> dict[str, Any]:
+        # Exclude routing fields that must not be forwarded to upstream models.
         body = self.model_dump(
             exclude_none=True,
-            exclude={"model", "messages", "stream"},
+            exclude={"model", "models", "messages", "stream"},
         )
         body.pop("n", None)
         return body
 
     def synthesis_request_body(self) -> dict[str, Any]:
         return self.candidate_request_body()
+
+    def passthrough_request_body(self) -> dict[str, Any]:
+        # For direct pass-through, forward everything except fields we manage
+        # ourselves. `models` is intentionally excluded: if we're in pass-through
+        # the list was empty, so there is nothing meaningful to forward.
+        body = self.model_dump(
+            exclude_none=True,
+            exclude={"model", "models", "messages", "stream"},
+        )
+        body.pop("n", None)
+        return body
 
 
 class ResponseMessage(BaseModel):

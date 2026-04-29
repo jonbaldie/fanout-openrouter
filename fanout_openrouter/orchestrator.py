@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 import logging
+import random
 from typing import Any, AsyncIterator, Awaitable, Callable, Protocol
 
 from .models import ChatCompletionRequest, ChatMessage
@@ -528,9 +529,6 @@ def _shared_upstream_client_error(
         message=message,
         code=code,
     )
-
-
-import random
 
 
 def distribute_models(model_pool: list[str], n: int) -> list[str]:
