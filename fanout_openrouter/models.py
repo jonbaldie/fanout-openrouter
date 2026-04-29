@@ -62,8 +62,15 @@ class ResponseMessage(BaseModel):
     @model_serializer(mode="wrap")
     def serialize_model(self, handler) -> dict[str, Any]:
         result = handler(self)
-        if result.get("tool_calls") is None:
-            result.pop("tool_calls", None)
+        # Strip fields that OpenRouter omits entirely when not applicable.
+        # - tool_calls: omitted unless the model issued a function call.
+        # - reasoning_details: omitted by OpenRouter for non-extended-thinking
+        #   models; present only when the model produced structured reasoning.
+        # NOTE: do NOT strip `reasoning`; OpenRouter always emits it as null
+        # for models that don't produce chain-of-thought, so we must match.
+        for field in ("tool_calls", "reasoning_details"):
+            if result.get(field) is None:
+                result.pop(field, None)
         return result
 
 

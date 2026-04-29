@@ -1201,3 +1201,158 @@ def test_parity_chat_response_format(api_key: str, local_client: TestClient) -> 
         pytest.fail(f"parity drift in chat_response_format:\n  - {rendered}")
 
     _log("PASS")
+
+
+# ---------- pass-through routing (issue fan-out-openrouter-6oo) ----------
+
+
+def test_parity_chat_passthrough_non_stream(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    """
+    When the request carries a real (non-virtual) model ID and no inline
+    ``models`` list, the facade should proxy the request straight to
+    OpenRouter without fan-out.  The wire shape must be indistinguishable
+    from hitting OpenRouter directly.
+    """
+    _log("case: chat_passthrough_non_stream")
+
+    body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+    }
+
+    _log("step 1/3: hitting real OpenRouter directly")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", body)
+
+    _log("step 2/3: hitting local facade with same real model ID (pass-through)")
+    local = _capture_local_json(local_client, "/api/v1/chat/completions", body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_passthrough_non_stream:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_passthrough_stream(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    """
+    Streaming variant of the pass-through parity case: when the request
+    carries a real model ID with stream=True, the facade proxies the SSE
+    stream directly, and the event sequence must match OpenRouter's shape.
+    """
+    _log("case: chat_passthrough_stream")
+
+    body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+        "stream": True,
+    }
+
+    _log("step 1/3: hitting real OpenRouter stream directly")
+    oracle = _capture_oracle_stream(api_key, "/chat/completions", body)
+
+    _log("step 2/3: hitting local facade stream with real model ID (pass-through)")
+    local = _capture_local_stream(local_client, "/api/v1/chat/completions", body)
+
+    _log("step 3/3: diffing stream snapshots")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_passthrough_stream:\n  - {rendered}")
+
+    _log("PASS")
+
+
+# ---------- ad-hoc fan-out via inline models array (issue fan-out-openrouter-l2l) ----------
+
+
+def test_parity_chat_adhoc_fanout_non_stream(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    """
+    When the request body includes a ``models`` list alongside ``model``,
+    the facade should fan out to those candidate models ad-hoc (no policy
+    file match required).  The synthesized response must carry the same
+    wire shape as a regular OpenRouter completion.
+    """
+    _log("case: chat_adhoc_fanout_non_stream")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+    }
+    # Inline models list triggers ad-hoc fan-out; model field can be anything.
+    local_body = {
+        **oracle_body,
+        "models": ["anthropic/claude-haiku-4.5", "openai/gpt-5.4-nano"],
+    }
+
+    _log("step 1/3: hitting real OpenRouter as shape oracle")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade with inline models list (ad-hoc fan-out)")
+    local = _capture_local_json(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_adhoc_fanout_non_stream:\n  - {rendered}")
+
+    _log("PASS")
+
+
+def test_parity_chat_adhoc_fanout_stream(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    """
+    Streaming variant of the ad-hoc fan-out parity case.
+    """
+    _log("case: chat_adhoc_fanout_stream")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+        "stream": True,
+    }
+    local_body = {
+        **oracle_body,
+        "models": ["anthropic/claude-haiku-4.5", "openai/gpt-5.4-nano"],
+    }
+
+    _log("step 1/3: hitting real OpenRouter stream as shape oracle")
+    oracle = _capture_oracle_stream(api_key, "/chat/completions", oracle_body)
+
+    _log(
+        "step 2/3: hitting local facade stream with inline models list (ad-hoc fan-out)"
+    )
+    local = _capture_local_stream(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing stream snapshots")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_adhoc_fanout_stream:\n  - {rendered}")
+
+    _log("PASS")
