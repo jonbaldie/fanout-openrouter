@@ -726,7 +726,7 @@ def _buffered_deltas(candidate: CompletionResult) -> list[dict[str, Any]]:
 
     # If the candidate produced tool calls, emit them in a dedicated delta.
     if candidate.tool_calls:
-        # Initial chunk with function name and ID
+        # One chunk with everything except finish reasons
         chunks.append(
             {
                 "choices": [
@@ -735,18 +735,7 @@ def _buffered_deltas(candidate: CompletionResult) -> list[dict[str, Any]]:
                         "delta": {
                             "role": role,
                             "content": None,
-                            "tool_calls": [
-                                {
-                                    "index": i,
-                                    "id": tc.get("id"),
-                                    "type": tc.get("type", "function"),
-                                    "function": {
-                                        "name": tc.get("function", {}).get("name"),
-                                        "arguments": "",
-                                    },
-                                }
-                                for i, tc in enumerate(candidate.tool_calls)
-                            ],
+                            "tool_calls": candidate.tool_calls,
                         },
                         "finish_reason": None,
                         "native_finish_reason": None,
@@ -755,35 +744,7 @@ def _buffered_deltas(candidate: CompletionResult) -> list[dict[str, Any]]:
             }
         )
 
-        # Second chunk with arguments
-        chunks.append(
-            {
-                "choices": [
-                    {
-                        "index": 0,
-                        "delta": {
-                            "role": role,
-                            "content": None,
-                            "tool_calls": [
-                                {
-                                    "index": i,
-                                    "function": {
-                                        "arguments": tc.get("function", {}).get(
-                                            "arguments", ""
-                                        )
-                                    },
-                                }
-                                for i, tc in enumerate(candidate.tool_calls)
-                            ],
-                        },
-                        "finish_reason": None,
-                        "native_finish_reason": None,
-                    }
-                ]
-            }
-        )
-
-        # Then a chunk specifically marking the end of the tool calls
+        # Second chunk marking the end of the tool calls
         chunks.append(
             {
                 "choices": [
@@ -800,26 +761,50 @@ def _buffered_deltas(candidate: CompletionResult) -> list[dict[str, Any]]:
             }
         )
 
-        # If there's usage, we need a final empty chunk with the usage block
+        # Third identical chunk marking the end of the tool calls
+        chunks.append(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "role": role,
+                            "content": "",
+                        },
+                        "finish_reason": finish_reason,
+                        "native_finish_reason": native_finish_reason,
+                    }
+                ]
+            }
+        )
+
         if candidate.usage:
-            chunks.append(
-                {
-                    "choices": [
-                        {
-                            "index": 0,
-                            "delta": {
-                                "role": role,
-                                "content": "",
-                            },
-                            "finish_reason": finish_reason,
-                            "native_finish_reason": native_finish_reason,
-                        }
-                    ],
-                    "usage": candidate.usage,
-                }
-            )
+            chunks[-1]["usage"] = candidate.usage
 
         return chunks
+
+    # Terminal delta with finish_reason and (optionally) usage.
+    terminal: dict[str, Any] = {
+        "choices": [
+            {
+                "index": 0,
+                "delta": {"role": role, "content": ""},
+                "finish_reason": finish_reason,
+                "native_finish_reason": native_finish_reason,
+            }
+        ]
+    }
+    if candidate.usage:
+        terminal["usage"] = candidate.usage
+    chunks.append(terminal)
+
+    return chunks
+
+    if candidate.usage:
+        terminal["usage"] = candidate.usage
+    chunks.append(terminal)
+
+    return chunks
 
     # Terminal delta with finish_reason and (optionally) usage.
     terminal: dict[str, Any] = {
