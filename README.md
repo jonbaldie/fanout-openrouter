@@ -40,11 +40,9 @@ Example `fanout_policies.json`:
       "virtual_model": "fanout/minimal",
       "candidate_models": [
         "google/gemini-3-flash-preview",
-        "anthropic/claude-3-haiku"
+        "openai/gpt-4o-mini"
       ],
-      "fanout_count": 3,
-      "synthesis_model": "anthropic/claude-3-5-sonnet",
-      "default_fallback_model": "openai/gpt-4o-mini",
+      "fanout_count": 2,
       "created": 1710000000
     }
   ]
@@ -61,11 +59,11 @@ Example `fanout_policies.json`:
 
 ## Tool Calling Synthesis
 
-Unlike naive wrappers that bypass fan-out logic when tools are provided, `fanout-openrouter` provides **true tool calling synthesis**:
+When a request includes `tools`, the fan-out and synthesis process still applies:
 
-1. **Fanned Out Tool Choice:** The user's prompt and tool schema are fanned out to the candidate models.
-2. **Tool Intent Extraction:** If candidates decide to invoke a tool, their tool calls are captured and formatted into text blocks (e.g., `[Tool Call: get_weather({"city": "Paris"})]`).
-3. **True Synthesis:** The `synthesis_model` receives the candidate responses (including their intended tool calls) and is explicitly instructed to evaluate them. If the synthesis model agrees with the candidates, it invokes the final tool call natively, ensuring strict schema adherence for the downstream client.
+1. **Candidate Evaluation:** The prompt and tool schemas are sent to all candidate models.
+2. **Serialization:** If a candidate decides to invoke a tool, its tool call is serialized into a text block (e.g., `[Tool Call: get_weather({"city": "Paris"})]`) so the synthesizer can evaluate the intent.
+3. **Synthesis & Execution:** The synthesis model receives the candidate responses (including the serialized tool calls) along with the original tool schemas. It is instructed to evaluate the candidates' intents and, if appropriate, execute the final tool call natively. This ensures strict schema adherence for the downstream client.
 
 ## Test
 
