@@ -522,6 +522,36 @@ def test_parity_chat_invalid_bearer_error(
     _log("PASS")
 
 
+def test_parity_chat_empty_messages_error(
+    api_key: str,
+    local_client: TestClient,
+) -> None:
+    _log("case: chat_empty_messages_error")
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [],
+        "max_tokens": 10,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter with empty messages")
+    oracle = _capture_oracle_json(api_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade with empty messages")
+    local = _capture_local_json(local_client, "/api/v1/chat/completions", local_body)
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(f"parity drift in chat_empty_messages_error:\n  - {rendered}")
+
+    _log("PASS")
+
+
 def test_parity_models_list_shape(local_client: TestClient) -> None:
     """
     OpenRouter's /models catalog is enormous and dynamic; we can't mirror its
