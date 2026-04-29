@@ -12,6 +12,27 @@ Based on the top ranked models on OpenRouter, here are some highly recommended p
 {
   "policies": [
     {
+      "virtual_model": "fanout/auto",
+      "candidate_models": [
+        "openrouter/auto"
+      ],
+      "fanout_count": 3,
+      "synthesis_model": "openrouter/auto",
+      "created": 1710000004
+    },
+    {
+      "virtual_model": "fanout/frontier",
+      "candidate_models": [
+        "anthropic/claude-opus-4.7",
+        "openai/gpt-5.5",
+        "google/gemini-3.1-pro-preview"
+      ],
+      "fanout_count": 3,
+      "synthesis_model": "anthropic/claude-opus-4.7",
+      "default_fallback_model": "openai/gpt-5.5",
+      "created": 1710000005
+    },
+    {
       "virtual_model": "fanout/minimal",
       "candidate_models": [
         "anthropic/claude-haiku-4.5",
@@ -58,17 +79,27 @@ Based on the top ranked models on OpenRouter, here are some highly recommended p
 }
 ```
 
-### 1. `fanout/max-intelligence` (Tier 1)
+### 1. `fanout/auto` (Dynamic Routing)
+- **Goal:** Let OpenRouter dynamically pick the best models based on cost/performance while still leveraging consensus.
+- **Strategy:** Queries `openrouter/auto` 3 times. OpenRouter will route each request dynamically, and then synthesis is performed by `openrouter/auto`.
+- **Use Cases:** General purpose queries where you want cost-efficiency without giving up the benefits of multi-agent synthesis.
+
+### 2. `fanout/frontier` (Absolute Vanguard)
+- **Goal:** Absolute cutting-edge capabilities from the three major AI labs.
+- **Strategy:** Queries the very latest flagship models (`Claude 4.7 Opus`, `GPT-5.5`, and `Gemini 3.1 Pro`) concurrently. Opus is then used to synthesize the absolute best response from all three industry titans.
+- **Use Cases:** The hardest logical problems, novel mathematical research, extreme edge cases in coding.
+
+### 3. `fanout/max-intelligence` (Tier 1)
 - **Goal:** Best possible reasoning and coding answers for complex problems, regardless of cost.
 - **Strategy:** Ask the 3 smartest models on the planet (Claude 4.7 Opus, Claude 4.6 Sonnet, and Deepseek v3.2) to draft solutions, and have Opus evaluate them and synthesize the absolute best response.
 - **Use Cases:** Software architecture, advanced mathematics, refactoring massive codebases.
 
-### 2. `fanout/fast-consensus` (Tier 2)
+### 4. `fanout/fast-consensus` (Tier 2)
 - **Goal:** Fast, cheap, and capable consensus logic.
 - **Strategy:** Fanning out 5 times across ultra-fast models like Gemini 3 Flash, Grok 4.1 Fast, and Step 3.5 Flash. It round-robins them, gathering 5 responses in a matter of seconds, before asking Gemini 3 Flash to synthesize the consensus.
 - **Use Cases:** Document summarization, routing classifiers, extracting data from large messy logs.
 
-### 3. `fanout/free-tier` (Tier 3)
+### 5. `fanout/free-tier` (Tier 3)
 - **Goal:** Zero-cost inference.
 - **Strategy:** Leverages models that are currently offered for free on OpenRouter, giving you a powerful multi-agent ensemble setup at $0.00 cost.
 - **Use Cases:** Academic experimentation, personal hobby projects, high-volume repetitive tasks.
