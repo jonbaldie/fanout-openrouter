@@ -523,6 +523,51 @@ def test_parity_chat_invalid_bearer_error(
     _log("PASS")
 
 
+def test_parity_chat_stream_invalid_bearer_error(
+    local_client_without_embedded_key: TestClient,
+) -> None:
+    """
+    When a stream=True request fails auth, OpenRouter doesn't open an SSE
+    stream; it returns a plain JSON error at the HTTP level. Our facade must
+    behave the same way so clients don't have to special-case streaming
+    error handling.
+    """
+    _log("case: chat_stream_invalid_bearer_error")
+
+    bad_key = "sk-or-v1-definitely-not-a-valid-key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+    oracle_body = {
+        "model": ORACLE_MODEL,
+        "messages": [{"role": "user", "content": "say ok"}],
+        "max_tokens": 10,
+        "stream": True,
+    }
+    local_body = {**oracle_body, "model": LOCAL_VIRTUAL_MODEL}
+
+    _log("step 1/3: hitting real OpenRouter stream with bad bearer")
+    oracle = _capture_oracle_json(bad_key, "/chat/completions", oracle_body)
+
+    _log("step 2/3: hitting local facade stream with bad bearer")
+    local = _capture_local_json(
+        local_client_without_embedded_key,
+        "/api/v1/chat/completions",
+        local_body,
+        headers={"Authorization": f"Bearer {bad_key}"},
+    )
+
+    _log("step 3/3: diffing")
+    diffs = _diff_snapshots(oracle, local)
+
+    if diffs:
+        rendered = "\n  - ".join(diffs)
+        _log(f"FAIL: {len(diffs)} diffs")
+        pytest.fail(
+            f"parity drift in chat_stream_invalid_bearer_error:\n  - {rendered}"
+        )
+
+    _log("PASS")
+
+
 def test_parity_chat_unknown_submodel_error(
     api_key: str,
     tmp_path: Path,
