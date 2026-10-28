@@ -128,4 +128,6 @@ A Unix timestamp integer. This is strictly used for the `GET /api/v1/models` API
 
 ## Reloading Policies
 
+See the [exploratory policy reload findings](exploratory-testing/2026-10-28-api-and-policy.md) for a known development-mode limitation.
+
 The proxy reads the policy file at startup. If you modify `fanout_policies.json`, you must restart the `uvicorn` server for the changes to take effect. If you are running in development mode via `just dev` (which uses `--reload`), saving the JSON file will automatically trigger a server restart.

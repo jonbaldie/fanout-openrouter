@@ -1,0 +1,12 @@
+default model ids: ['fanout/minimal', 'fanout/max-intelligence', 'fanout/fast-consensus', 'fanout/free-tier', 'fanout/auto', 'fanout/frontier', 'fanout/fleet-of-nanos']
+no key stream=False: (401, {'error': {'message': 'No cookie auth credentials found', 'code': 401}})
+no key stream=True: (401, {'error': {'message': 'No cookie auth credentials found', 'code': 401}})
+invalid request: (400, {'error': {'message': 'Input required: specify "prompt" or "messages"', 'code': 400}})
+reload run 1 initial: ['test/first']
+reload run 1 after edit: ['test/first']
+reload run 1 after restart: ['test/second']
+reload run 2 initial: ['test/first']
+reload run 2 after edit: ['test/first']
+reload run 2 after restart: ['test/second']
+server process groups: [1539281, 1539282, 1539295, 1539300, 1539320]
+all parent processes exited: True
