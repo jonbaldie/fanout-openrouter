@@ -21,7 +21,7 @@ test *args:
 
 # Run the development server
 dev:
-    uv run uvicorn fanout_openrouter.app:app --reload
+    uv run uvicorn fanout_openrouter.app:app --reload --reload-include '*.json'
 
 # Find available work via beads
 ready:
