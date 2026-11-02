@@ -36,4 +36,5 @@ markers = [
 dev = [
     "pytest-cov>=7.1.0",
     "ruff>=0.15.12",
+    "watchfiles>=1.0.0",
 ]
