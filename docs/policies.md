@@ -131,3 +131,5 @@ A Unix timestamp integer. This is strictly used for the `GET /api/v1/models` API
 The proxy reads the policy file at startup. Restart the server after modifying the policy file.
 
 For development, run `uv sync --all-extras`, then `just dev`. Saving a JSON file in the project directory restarts the server and reloads the policy. If `FANOUT_POLICY_FILE` points outside the project directory, restart the server after modifying that file.
+
+The [policy reload exploratory report](exploratory-testing/2026-11-05-api-and-reload.md) records a reload check and its limitations.
