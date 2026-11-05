@@ -1,0 +1,15 @@
+registered process group 1943707 port 8000
+initial models: (200, ['test/first'])
+valid non-stream without key (401, '{"error":{"message":"No cookie auth credentials found","code":401}}')
+valid stream without key (401, '{"error":{"message":"No cookie auth credentials found","code":401}}')
+missing messages (400, '{"error":{"message":"Input required: specify \\"prompt\\" or \\"messages\\"","code":400}}')
+after saving second: (200, ['test/second'])
+after restoring first: (200, ['test/first'])
+replay saving second: (200, ['test/second'])
+leader return code: 143
+process group still exists: 1943707
+port 8000 closed: False
+
+Delayed teardown verification after 3 seconds:
+process group 1943707 absent
+port 8000 has no listener
