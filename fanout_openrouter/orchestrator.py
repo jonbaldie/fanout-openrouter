@@ -98,46 +98,7 @@ class SynthesizerService:
         request: ChatCompletionRequest,
         policy: FanoutPolicy,
     ) -> OrchestratedResponse:
-        distributed = distribute_models(
-            list(policy.candidate_models), policy.fanout_count
-        )
-        tasks = [
-            self._run_with_default_model_retry(
-                request.messages,
-                model,
-                policy.default_fallback_model,
-                request.candidate_request_body(),
-            )
-            for model in distributed
-        ]
-        results = await asyncio.gather(*tasks)
-
-        candidates: list[CompletionResult] = []
-        failures: list[str] = []
-        failure_exceptions: list[OpenRouterError | None] = []
-        for index, (result, failure, final_model) in enumerate(results, start=1):
-            if failure is not None:
-                logger.warning(
-                    "candidate_failed",
-                    extra={"candidate_index": index, "error": failure.message},
-                )
-                failures.append(f"candidate {index} ({final_model}): {failure.message}")
-                failure_exceptions.append(failure.last_exception)
-                continue
-
-            logger.info(
-                "candidate_completed",
-                extra={"candidate_index": index, "model": final_model},
-            )
-            candidates.append(result)
-
-        if not candidates:
-            shared = _shared_upstream_client_error(failure_exceptions)
-            if shared is not None:
-                raise shared
-            raise AllCandidatesFailedError(
-                "all candidates failed: " + "; ".join(failures)
-            )
+        candidates = await self._run_candidates(request, policy)
 
         if len(candidates) == 1:
             candidate = candidates[0]
@@ -193,24 +154,13 @@ class SynthesizerService:
     ) -> AsyncIterator[tuple[StreamPreamble | None, dict[str, Any] | str | None]]:
         """
         Run candidates to completion, then stream the synthesis call's
-        deltas as they arrive upstream. The iterator yields a sequence of
-        `(preamble, chunk)` pairs:
+        deltas as they arrive upstream. Keep-alive comments may precede
+        the first data chunk. That chunk carries the preamble that fixes
+        the model and provider for the rest of the response.
 
-          - exactly one leading pair where `preamble` is set and `chunk` is
-            None: tells the caller which identity (model/provider) to
-            stamp on outgoing SSE frames.
-          - zero or more pairs where `preamble` is None and `chunk` is a
-            raw upstream delta dict.
-
-        Upstream errors raised before any delta is yielded propagate as
-        UpstreamClientError / AllCandidatesFailedError, matching the
-        non-streaming path so the HTTP layer can turn them into a JSON
-        error response rather than an SSE body.
-
-        If there's only one viable candidate (or synthesis itself fails
-        before emitting any content), we fall back to a buffered stream
-        built from the first candidate so the wire contract stays
-        consistent from the client's perspective.
+        Before the preamble, a failed synthesis attempt may switch to the
+        fallback model. If all synthesis attempts fail before the preamble,
+        or only one candidate succeeds, stream the first viable candidate.
         """
         candidates_task = asyncio.create_task(self._run_candidates(request, policy))
         while not candidates_task.done():
@@ -246,54 +196,28 @@ class SynthesizerService:
         synthesis_messages = [ChatMessage(role="user", content=synthesis_prompt)]
         extra_body = request.synthesis_request_body()
 
-        # Attempt the primary synthesis model first. If it fails *before*
-        # emitting any content, transparently fall back to the policy's
-        # default fallback model. Once any delta has been yielded we're
-        # committed - a mid-stream upstream error propagates as-is.
-        primary_model = policy.synthesis_model
-        fallback_model = policy.default_fallback_model
+        attempts = [("primary", policy.synthesis_model)]
+        if policy.default_fallback_model != policy.synthesis_model:
+            attempts.append(("fallback", policy.default_fallback_model))
 
-        stream_started = False
-        try:
-            async for item in self._stream_one_synthesis_attempt(
-                synthesis_messages,
-                primary_model,
-                extra_body,
-                synthesized=True,
-            ):
-                stream_started = True
-                yield item
-            return
-        except OpenRouterError as exc:
-            if stream_started:
-                raise
-            logger.warning(
-                "synthesis_stream_primary_failed",
-                extra={"model": primary_model, "error": str(exc)},
-            )
-
-        if primary_model != fallback_model:
+        for attempt, model in attempts:
+            committed = False
             try:
-                async for item in self._stream_one_synthesis_attempt(
-                    synthesis_messages,
-                    fallback_model,
-                    extra_body,
-                    synthesized=True,
+                async for preamble, chunk in self._stream_one_synthesis_attempt(
+                    synthesis_messages, model, extra_body, synthesized=True
                 ):
-                    stream_started = True
-                    yield item
+                    if preamble is not None:
+                        committed = True
+                    yield preamble, chunk
                 return
             except OpenRouterError as exc:
-                if stream_started:
+                if committed:
                     raise
                 logger.warning(
-                    "synthesis_stream_fallback_failed",
-                    extra={"model": fallback_model, "error": str(exc)},
+                    f"synthesis_stream_{attempt}_failed",
+                    extra={"model": model, "error": str(exc)},
                 )
 
-        # Both streamed attempts failed before producing content; emit the
-        # first candidate as a buffered stream so the client still gets a
-        # valid response.
         logger.warning("synthesis_stream_falling_back_to_candidate")
         candidate = candidates[0]
         preamble = StreamPreamble(
